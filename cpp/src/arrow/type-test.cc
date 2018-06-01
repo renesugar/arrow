@@ -26,6 +26,7 @@
 
 #include "arrow/test-util.h"
 #include "arrow/type.h"
+#include "arrow/util/checked_cast.h"
 #include "arrow/util/key_value_metadata.h"
 
 using std::shared_ptr;
@@ -45,12 +46,16 @@ TEST(TestField, Basics) {
 }
 
 TEST(TestField, Equals) {
+  auto meta = key_value_metadata({{"a", "1"}, {"b", "2"}});
+
   Field f0("f0", int32());
   Field f0_nn("f0", int32(), false);
   Field f0_other("f0", int32());
+  Field f0_with_meta("f0", int32(), true, meta);
 
   ASSERT_TRUE(f0.Equals(f0_other));
   ASSERT_FALSE(f0.Equals(f0_nn));
+  ASSERT_FALSE(f0.Equals(f0_with_meta));
 }
 
 TEST(TestField, TestMetadataConstruction) {
@@ -84,6 +89,33 @@ TEST(TestField, TestRemoveMetadata) {
   auto f1 = field("f0", int32(), true, metadata);
   std::shared_ptr<Field> f2 = f1->RemoveMetadata();
   ASSERT_TRUE(f2->metadata() == nullptr);
+}
+
+TEST(TestField, TestFlatten) {
+  auto metadata = std::shared_ptr<KeyValueMetadata>(
+      new KeyValueMetadata({"foo", "bar"}, {"bizz", "buzz"}));
+  auto f0 = field("f0", int32(), true /* nullable */, metadata);
+  auto vec = f0->Flatten();
+  ASSERT_EQ(vec.size(), 1);
+  ASSERT_TRUE(vec[0]->Equals(*f0));
+
+  auto f1 = field("f1", float64(), false /* nullable */);
+  auto ff = field("nest", struct_({f0, f1}));
+  vec = ff->Flatten();
+  ASSERT_EQ(vec.size(), 2);
+  auto expected0 = field("nest.f0", int32(), true /* nullable */, metadata);
+  // nullable parent implies nullable flattened child
+  auto expected1 = field("nest.f1", float64(), true /* nullable */);
+  ASSERT_TRUE(vec[0]->Equals(*expected0));
+  ASSERT_TRUE(vec[1]->Equals(*expected1));
+
+  ff = field("nest", struct_({f0, f1}), false /* nullable */);
+  vec = ff->Flatten();
+  ASSERT_EQ(vec.size(), 2);
+  expected0 = field("nest.f0", int32(), true /* nullable */, metadata);
+  expected1 = field("nest.f1", float64(), false /* nullable */);
+  ASSERT_TRUE(vec[0]->Equals(*expected0));
+  ASSERT_TRUE(vec[1]->Equals(*expected1));
 }
 
 class TestSchema : public ::testing::Test {
@@ -169,10 +201,25 @@ TEST_F(TestSchema, TestMetadataConstruction) {
   auto f0 = field("f0", int32());
   auto f1 = field("f1", uint8(), false);
   auto f2 = field("f2", utf8());
-  auto metadata = std::shared_ptr<KeyValueMetadata>(
-      new KeyValueMetadata({"foo", "bar"}, {"bizz", "buzz"}));
-  auto schema = ::arrow::schema({f0, f1, f2}, metadata);
-  ASSERT_TRUE(metadata->Equals(*schema->metadata()));
+  auto metadata0 = key_value_metadata({{"foo", "bar"}, {"bizz", "buzz"}});
+  auto metadata1 = key_value_metadata({{"foo", "baz"}});
+
+  auto schema0 = ::arrow::schema({f0, f1, f2}, metadata0);
+  ASSERT_TRUE(metadata0->Equals(*schema0->metadata()));
+
+  auto schema1 = ::arrow::schema({f0, f1, f2}, metadata1);
+  ASSERT_TRUE(metadata1->Equals(*schema1->metadata()));
+
+  auto schema2 = ::arrow::schema({f0, f1, f2}, metadata0->Copy());
+  ASSERT_TRUE(metadata0->Equals(*schema2->metadata()));
+
+  ASSERT_TRUE(schema0->Equals(*schema2));
+  ASSERT_FALSE(schema0->Equals(*schema1));
+  ASSERT_FALSE(schema2->Equals(*schema1));
+
+  // don't check metadata
+  ASSERT_TRUE(schema0->Equals(*schema1, false));
+  ASSERT_TRUE(schema2->Equals(*schema1, false));
 }
 
 TEST_F(TestSchema, TestAddMetadata) {
@@ -282,8 +329,8 @@ TEST(TestDateTypes, Attrs) {
   ASSERT_EQ("date32[day]", t1->ToString());
   ASSERT_EQ("date64[ms]", t2->ToString());
 
-  ASSERT_EQ(32, static_cast<const FixedWidthType&>(*t1).bit_width());
-  ASSERT_EQ(64, static_cast<const FixedWidthType&>(*t2).bit_width());
+  ASSERT_EQ(32, checked_cast<const FixedWidthType&>(*t1).bit_width());
+  ASSERT_EQ(64, checked_cast<const FixedWidthType&>(*t2).bit_width());
 }
 
 TEST(TestTimeType, Equals) {
@@ -397,6 +444,40 @@ TEST(TestStructType, Basics) {
   ASSERT_EQ(struct_type.ToString(), "struct<f0: int32, f1: string, f2: uint8>");
 
   // TODO(wesm): out of bounds for field(...)
+}
+
+TEST(TestStructType, GetChildByName) {
+  auto f0 = field("f0", int32());
+  auto f1 = field("f1", uint8(), false);
+  auto f2 = field("f2", utf8());
+  auto f3 = field("f3", list(int16()));
+
+  StructType struct_type({f0, f1, f2, f3});
+  std::shared_ptr<Field> result;
+
+  result = struct_type.GetChildByName("f1");
+  ASSERT_EQ(f1, result);
+
+  result = struct_type.GetChildByName("f3");
+  ASSERT_EQ(f3, result);
+
+  result = struct_type.GetChildByName("not-found");
+  ASSERT_EQ(result, nullptr);
+}
+
+TEST(TestStructType, GetChildIndex) {
+  auto f0 = field("f0", int32());
+  auto f1 = field("f1", uint8(), false);
+  auto f2 = field("f2", utf8());
+  auto f3 = field("f3", list(int16()));
+
+  StructType struct_type({f0, f1, f2, f3});
+
+  ASSERT_EQ(0, struct_type.GetChildIndex(f0->name()));
+  ASSERT_EQ(1, struct_type.GetChildIndex(f1->name()));
+  ASSERT_EQ(2, struct_type.GetChildIndex(f2->name()));
+  ASSERT_EQ(3, struct_type.GetChildIndex(f3->name()));
+  ASSERT_EQ(-1, struct_type.GetChildIndex("not-found"));
 }
 
 TEST(TypesTest, TestDecimal128Small) {

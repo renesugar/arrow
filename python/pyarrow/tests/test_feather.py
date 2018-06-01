@@ -17,6 +17,7 @@
 
 import os
 import sys
+import tempfile
 import unittest
 import pytest
 
@@ -27,14 +28,13 @@ from pandas.util.testing import assert_frame_equal
 import pandas as pd
 
 import pyarrow as pa
-from pyarrow.compat import guid
 from pyarrow.feather import (read_feather, write_feather,
-                             FeatherReader)
+                             read_table, FeatherReader, FeatherDataset)
 from pyarrow.lib import FeatherWriter
 
 
-def random_path():
-    return 'feather_{}'.format(guid())
+def random_path(prefix='feather_'):
+    return tempfile.mktemp(prefix=prefix)
 
 
 class TestFeatherReader(unittest.TestCase):
@@ -65,7 +65,7 @@ class TestFeatherReader(unittest.TestCase):
 
     def _check_pandas_roundtrip(self, df, expected=None, path=None,
                                 columns=None, null_counts=None,
-                                nthreads=1):
+                                use_threads=False):
         if path is None:
             path = random_path()
 
@@ -74,7 +74,7 @@ class TestFeatherReader(unittest.TestCase):
         if not os.path.exists(path):
             raise Exception('file not written')
 
-        result = read_feather(path, columns, nthreads=nthreads)
+        result = read_feather(path, columns, use_threads=use_threads)
         if expected is None:
             expected = df
 
@@ -99,6 +99,30 @@ class TestFeatherReader(unittest.TestCase):
             write_feather(df, path)
 
         pytest.raises(exc, f)
+
+    def test_dataset(self):
+        num_values = (100, 100)
+        num_files = 5
+        paths = [random_path() for i in range(num_files)]
+        df = pd.DataFrame(np.random.randn(*num_values),
+                          columns=['col_' + str(i)
+                                   for i in range(num_values[1])])
+
+        self.test_files.extend(paths)
+        for index, path in enumerate(paths):
+            rows = (index * (num_values[0] // num_files),
+                    (index + 1) * (num_values[0] // num_files))
+            writer = FeatherWriter()
+            writer.open(path)
+
+            for col in range(num_values[1]):
+                writer.write_array(df.columns[col],
+                                   df.iloc[rows[0]:rows[1], col])
+
+            writer.close()
+
+        data = FeatherDataset(paths).read_pandas()
+        assert_frame_equal(data, df)
 
     def test_num_rows_attr(self):
         df = pd.DataFrame({'foo': [1, 2, 3, 4, 5]})
@@ -128,6 +152,29 @@ class TestFeatherReader(unittest.TestCase):
 
         df = pd.DataFrame(data)
         self._check_pandas_roundtrip(df)
+
+    def test_read_table(self):
+        num_values = (100, 100)
+        path = random_path()
+
+        self.test_files.append(path)
+        writer = FeatherWriter()
+        writer.open(path)
+
+        values = np.random.randint(0, 100, size=num_values)
+
+        for i in range(100):
+            writer.write_array('col_' + str(i), values[:, i])
+
+        writer.close()
+
+        data = pd.DataFrame(values,
+                            columns=['col_' + str(i) for i in range(100)])
+        table = pa.Table.from_pandas(data)
+
+        result = read_table(path)
+
+        assert_frame_equal(table.to_pandas(), result.to_pandas())
 
     def test_float_nulls(self):
         num_values = 100
@@ -337,7 +384,7 @@ class TestFeatherReader(unittest.TestCase):
         data = {'c{0}'.format(i): [''] * 10
                 for i in range(100)}
         df = pd.DataFrame(data)
-        self._check_pandas_roundtrip(df, nthreads=4)
+        self._check_pandas_roundtrip(df, use_threads=True)
 
     def test_nan_as_null(self):
         # Create a nan that is not numpy.nan
@@ -400,7 +447,7 @@ class TestFeatherReader(unittest.TestCase):
         # GH #209
         name = (b'Besa_Kavaj\xc3\xab.feather').decode('utf-8')
         df = pd.DataFrame({'foo': [1, 2, 3, 4]})
-        self._check_pandas_roundtrip(df, path=name)
+        self._check_pandas_roundtrip(df, path=random_path(prefix=name))
 
     def test_read_columns(self):
         data = {'foo': [1, 2, 3, 4],
@@ -465,7 +512,7 @@ class TestFeatherReader(unittest.TestCase):
 
         # non-strings
         df = pd.DataFrame({'a': ['a', 1, 2.0]})
-        self._assert_error_on_write(df, ValueError)
+        self._assert_error_on_write(df, TypeError)
 
     @pytest.mark.slow
     def test_large_dataframe(self):

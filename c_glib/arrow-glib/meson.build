@@ -26,6 +26,7 @@ sources = files(
   'column.cpp',
   'composite-array.cpp',
   'composite-data-type.cpp',
+  'decimal.cpp',
   'error.cpp',
   'field.cpp',
   'record-batch.cpp',
@@ -68,6 +69,7 @@ c_headers = files(
   'composite-array.h',
   'composite-data-type.h',
   'data-type.h',
+  'decimal.h',
   'error.h',
   'field.h',
   'gobject-type.h',
@@ -111,6 +113,7 @@ cpp_headers = files(
   'chunked-array.hpp',
   'column.hpp',
   'data-type.hpp',
+  'decimal.hpp',
   'error.hpp',
   'field.hpp',
   'record-batch.hpp',
@@ -141,6 +144,16 @@ cpp_headers += files(
   'compute.hpp',
 )
 
+
+version_h_conf = configuration_data()
+version_h_conf.set('GARROW_VERSION_MAJOR', version_major)
+version_h_conf.set('GARROW_VERSION_MINOR', version_minor)
+version_h_conf.set('GARROW_VERSION_MICRO', version_micro)
+version_h_conf.set('GARROW_VERSION_TAG', version_tag)
+version_h = configure_file(input: 'version.h.in',
+                           output: 'version.h',
+                           configuration: version_h_conf)
+c_headers += version_h
 
 enums = gnome.mkenums('enums',
                       sources: c_headers,

@@ -26,12 +26,17 @@
 #include "arrow/array.h"
 #include "arrow/compare.h"
 #include "arrow/status.h"
+#include "arrow/util/checked_cast.h"
 #include "arrow/util/key_value_metadata.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/stl.h"
 #include "arrow/visitor.h"
 
 namespace arrow {
+
+bool Field::HasMetadata() const {
+  return (metadata_ != nullptr) && (metadata_->size() > 0);
+}
 
 std::shared_ptr<Field> Field::AddMetadata(
     const std::shared_ptr<const KeyValueMetadata>& metadata) const {
@@ -42,18 +47,33 @@ std::shared_ptr<Field> Field::RemoveMetadata() const {
   return std::make_shared<Field>(name_, type_, nullable_);
 }
 
+std::vector<std::shared_ptr<Field>> Field::Flatten() const {
+  std::vector<std::shared_ptr<Field>> flattened;
+  if (type_->id() == Type::STRUCT) {
+    for (const auto& child : type_->children()) {
+      auto flattened_child = std::make_shared<Field>(*child);
+      flattened.push_back(flattened_child);
+      flattened_child->name_.insert(0, name() + ".");
+      flattened_child->nullable_ |= nullable_;
+    }
+  } else {
+    flattened.push_back(std::make_shared<Field>(*this));
+  }
+  return flattened;
+}
+
 bool Field::Equals(const Field& other) const {
   if (this == &other) {
     return true;
   }
   if (this->name_ == other.name_ && this->nullable_ == other.nullable_ &&
       this->type_->Equals(*other.type_.get())) {
-    if (metadata_ == nullptr && other.metadata_ == nullptr) {
-      return true;
-    } else if ((metadata_ == nullptr) ^ (other.metadata_ == nullptr)) {
-      return false;
-    } else {
+    if (this->HasMetadata() && other.HasMetadata()) {
       return metadata_->Equals(*other.metadata_);
+    } else if (!this->HasMetadata() && !other.HasMetadata()) {
+      return true;
+    } else {
+      return false;
     }
   }
   return false;
@@ -107,20 +127,6 @@ std::string FixedSizeBinaryType::ToString() const {
   std::stringstream ss;
   ss << "fixed_size_binary[" << byte_width_ << "]";
   return ss.str();
-}
-
-std::string StructType::ToString() const {
-  std::stringstream s;
-  s << "struct<";
-  for (int i = 0; i < this->num_children(); ++i) {
-    if (i > 0) {
-      s << ", ";
-    }
-    std::shared_ptr<Field> field = this->child(i);
-    s << field->name() << ": " << field->type()->ToString();
-  }
-  s << ">";
-  return s.str();
 }
 
 // ----------------------------------------------------------------------
@@ -207,6 +213,43 @@ std::string UnionType::ToString() const {
 }
 
 // ----------------------------------------------------------------------
+// Struct type
+
+std::string StructType::ToString() const {
+  std::stringstream s;
+  s << "struct<";
+  for (int i = 0; i < this->num_children(); ++i) {
+    if (i > 0) {
+      s << ", ";
+    }
+    std::shared_ptr<Field> field = this->child(i);
+    s << field->name() << ": " << field->type()->ToString();
+  }
+  s << ">";
+  return s.str();
+}
+
+std::shared_ptr<Field> StructType::GetChildByName(const std::string& name) const {
+  int i = GetChildIndex(name);
+  return i == -1 ? nullptr : children_[i];
+}
+
+int StructType::GetChildIndex(const std::string& name) const {
+  if (children_.size() > 0 && name_to_index_.size() == 0) {
+    for (size_t i = 0; i < children_.size(); ++i) {
+      name_to_index_[children_[i]->name()] = static_cast<int>(i);
+    }
+  }
+
+  auto it = name_to_index_.find(name);
+  if (it == name_to_index_.end()) {
+    return -1;
+  } else {
+    return it->second;
+  }
+}
+
+// ----------------------------------------------------------------------
 // DictionaryType
 
 DictionaryType::DictionaryType(const std::shared_ptr<DataType>& index_type,
@@ -217,7 +260,7 @@ DictionaryType::DictionaryType(const std::shared_ptr<DataType>& index_type,
       ordered_(ordered) {}
 
 int DictionaryType::bit_width() const {
-  return static_cast<const FixedWidthType*>(index_type_.get())->bit_width();
+  return checked_cast<const FixedWidthType&>(*index_type_).bit_width();
 }
 
 std::shared_ptr<Array> DictionaryType::dictionary() const { return dictionary_; }
@@ -245,11 +288,12 @@ Schema::Schema(std::vector<std::shared_ptr<Field>>&& fields,
                const std::shared_ptr<const KeyValueMetadata>& metadata)
     : fields_(std::move(fields)), metadata_(metadata) {}
 
-bool Schema::Equals(const Schema& other) const {
+bool Schema::Equals(const Schema& other, bool check_metadata) const {
   if (this == &other) {
     return true;
   }
 
+  // checks field equality
   if (num_fields() != other.num_fields()) {
     return false;
   }
@@ -258,7 +302,17 @@ bool Schema::Equals(const Schema& other) const {
       return false;
     }
   }
-  return true;
+
+  // check metadata equality
+  if (!check_metadata) {
+    return true;
+  } else if (this->HasMetadata() && other.HasMetadata()) {
+    return metadata_->Equals(*other.metadata_);
+  } else if (!this->HasMetadata() && !other.HasMetadata()) {
+    return true;
+  } else {
+    return false;
+  }
 }
 
 std::shared_ptr<Field> Schema::GetFieldByName(const std::string& name) const {
@@ -290,6 +344,10 @@ Status Schema::AddField(int i, const std::shared_ptr<Field>& field,
   *out =
       std::make_shared<Schema>(internal::AddVectorElement(fields_, i, field), metadata_);
   return Status::OK();
+}
+
+bool Schema::HasMetadata() const {
+  return (metadata_ != nullptr) && (metadata_->size() > 0);
 }
 
 std::shared_ptr<Schema> Schema::AddMetadata(
@@ -325,10 +383,7 @@ std::string Schema::ToString() const {
   }
 
   if (metadata_) {
-    buffer << "\n-- metadata --";
-    for (int64_t i = 0; i < metadata_->size(); ++i) {
-      buffer << "\n" << metadata_->key(i) << ": " << metadata_->value(i);
-    }
+    buffer << metadata_->ToString();
   }
 
   return buffer.str();
@@ -344,8 +399,8 @@ std::shared_ptr<Schema> schema(std::vector<std::shared_ptr<Field>>&& fields,
   return std::make_shared<Schema>(std::move(fields), metadata);
 }
 
-  // ----------------------------------------------------------------------
-  // Visitors and factory functions
+// ----------------------------------------------------------------------
+// Visitors and factory functions
 
 #define ACCEPT_VISITOR(TYPE) \
   Status TYPE::Accept(TypeVisitor* visitor) const { return visitor->Visit(*this); }

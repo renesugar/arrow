@@ -20,40 +20,62 @@ use libc;
 use std::mem;
 use std::slice;
 
+use super::datatypes::*;
 use super::memory::*;
 
-pub struct Buffer<T> {
+/// Buffer<T> is essentially just a Vec<T> for fixed-width primitive types and the start of the
+/// memory region is aligned at a 64-byte boundary
+pub struct Buffer<T>
+where
+    T: ArrowPrimitiveType,
+{
+    /// Contiguous memory region holding instances of primitive T
     data: *const T,
-    len: i32,
+    /// Number of elements in the buffer
+    len: usize,
 }
 
-impl<T> Buffer<T> {
-    pub fn len(&self) -> i32 {
+impl<T> Buffer<T>
+where
+    T: ArrowPrimitiveType,
+{
+    /// create a buffer from an existing region of memory (must already be byte-aligned)
+    pub unsafe fn from_raw_parts(data: *const T, len: usize) -> Self {
+        Buffer { data, len }
+    }
+
+    /// Get the number of elements in the buffer
+    pub fn len(&self) -> usize {
         self.len
     }
 
+    /// Get a pointer to the data contained by the buffer
     pub fn data(&self) -> *const T {
         self.data
     }
 
     pub fn slice(&self, start: usize, end: usize) -> &[T] {
+        assert!(end <= self.len);
         assert!(start <= end);
-        assert!(start < self.len as usize);
-        assert!(end <= self.len as usize);
-        unsafe { slice::from_raw_parts(self.data.offset(start as isize), (end - start) as usize) }
+        unsafe { slice::from_raw_parts(self.data.offset(start as isize), end - start) }
     }
 
+    /// Get a reference to the value at the specified offset
     pub fn get(&self, i: usize) -> &T {
+        assert!(i < self.len);
         unsafe { &(*self.data.offset(i as isize)) }
     }
 
+    /// Write to a slot in the buffer
     pub fn set(&mut self, i: usize, v: T) {
+        assert!(i < self.len);
+        let p = self.data as *mut T;
         unsafe {
-            let p = mem::transmute::<*const T, *mut T>(self.data);
             *p.offset(i as isize) = v;
         }
     }
 
+    /// Return an iterator over the values in the buffer
     pub fn iter(&self) -> BufferIterator<T> {
         BufferIterator {
             data: self.data,
@@ -63,70 +85,67 @@ impl<T> Buffer<T> {
     }
 }
 
-impl<T> Drop for Buffer<T> {
+/// Release the underlying memory when the Buffer goes out of scope
+impl<T> Drop for Buffer<T>
+where
+    T: ArrowPrimitiveType,
+{
     fn drop(&mut self) {
-        mem::drop(self.data)
+        free_aligned(self.data as *const u8);
     }
 }
 
-pub struct BufferIterator<T> {
+/// Iterator over the elements of a buffer
+pub struct BufferIterator<T>
+where
+    T: ArrowPrimitiveType,
+{
     data: *const T,
-    len: i32,
+    len: usize,
     index: isize,
 }
 
 impl<T> Iterator for BufferIterator<T>
 where
-    T: Copy,
+    T: ArrowPrimitiveType,
 {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.index < self.len as isize {
+            let value = unsafe { *self.data.offset(self.index) };
             self.index += 1;
-            Some(unsafe { *self.data.offset(self.index - 1) })
+            Some(value)
         } else {
             None
         }
     }
 }
 
-macro_rules! array_from_primitive {
-    ($DT:ty) => {
-        impl From<Vec<$DT>> for Buffer<$DT> {
-            fn from(v: Vec<$DT>) -> Self {
-                // allocate aligned memory buffer
-                let len = v.len();
-                let sz = mem::size_of::<$DT>();
-                let buffer = allocate_aligned((len * sz) as i64).unwrap();
-                Buffer {
-                    len: len as i32,
-                    data: unsafe {
-                        let dst = mem::transmute::<*const u8, *mut libc::c_void>(buffer);
-                        libc::memcpy(
-                            dst,
-                            mem::transmute::<*const $DT, *const libc::c_void>(v.as_ptr()),
-                            len * sz,
-                        );
-                        mem::transmute::<*mut libc::c_void, *const $DT>(dst)
-                    },
-                }
-            }
+/// Copy the memory from a Vec<T> into a newly allocated Buffer<T>
+impl<T> From<Vec<T>> for Buffer<T>
+where
+    T: ArrowPrimitiveType,
+{
+    fn from(v: Vec<T>) -> Self {
+        // allocate aligned memory buffer
+        let len = v.len();
+        let sz = mem::size_of::<T>();
+        let buffer = allocate_aligned((len * sz) as i64).unwrap();
+        Buffer {
+            len,
+            data: unsafe {
+                let dst = mem::transmute::<*const u8, *mut libc::c_void>(buffer);
+                libc::memcpy(
+                    dst,
+                    mem::transmute::<*const T, *const libc::c_void>(v.as_ptr()),
+                    len * sz,
+                );
+                mem::transmute::<*mut libc::c_void, *const T>(dst)
+            },
         }
-    };
+    }
 }
-
-array_from_primitive!(bool);
-array_from_primitive!(f32);
-array_from_primitive!(f64);
-array_from_primitive!(u8);
-array_from_primitive!(u16);
-array_from_primitive!(u32);
-array_from_primitive!(u64);
-array_from_primitive!(i8);
-array_from_primitive!(i16);
-array_from_primitive!(i32);
-array_from_primitive!(i64);
 
 impl From<Bytes> for Buffer<u8> {
     fn from(bytes: Bytes) -> Self {
@@ -134,16 +153,12 @@ impl From<Bytes> for Buffer<u8> {
         let len = bytes.len();
         let sz = mem::size_of::<u8>();
         let buf_mem = allocate_aligned((len * sz) as i64).unwrap();
+        let dst = buf_mem as *mut libc::c_void;
         Buffer {
-            len: len as i32,
+            len,
             data: unsafe {
-                let dst = mem::transmute::<*const u8, *mut libc::c_void>(buf_mem);
-                libc::memcpy(
-                    dst,
-                    mem::transmute::<*const u8, *const libc::c_void>(bytes.as_ptr()),
-                    len * sz,
-                );
-                mem::transmute::<*mut libc::c_void, *const u8>(dst)
+                libc::memcpy(dst, bytes.as_ptr() as *const libc::c_void, len * sz);
+                dst as *mut u8
             },
         }
     }
@@ -220,5 +235,40 @@ mod tests {
             .map(|(a, b)| a * b)
             .collect::<Vec<i32>>();
         assert_eq!(c, vec![5, 8, 9, 8, 5]);
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_get_out_of_bounds() {
+        let a = Buffer::from(vec![1, 2, 3, 4, 5]);
+        a.get(123); // should panic
+    }
+
+    #[test]
+    fn slice_empty_at_end() {
+        let a = Buffer::from(vec![1, 2, 3, 4, 5]);
+        let s = a.slice(5, 5);
+        assert_eq!(0, s.len());
+    }
+
+    #[test]
+    #[should_panic]
+    fn slice_start_out_of_bounds() {
+        let a = Buffer::from(vec![1, 2, 3, 4, 5]);
+        a.slice(6, 6); // should panic
+    }
+
+    #[test]
+    #[should_panic]
+    fn slice_end_out_of_bounds() {
+        let a = Buffer::from(vec![1, 2, 3, 4, 5]);
+        a.slice(0, 6); // should panic
+    }
+
+    #[test]
+    #[should_panic]
+    fn slice_end_before_start() {
+        let a = Buffer::from(vec![1, 2, 3, 4, 5]);
+        a.slice(3, 2); // should panic
     }
 }

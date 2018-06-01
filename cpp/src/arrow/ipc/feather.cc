@@ -38,6 +38,7 @@
 #include "arrow/table.h"
 #include "arrow/type.h"
 #include "arrow/util/bit-util.h"
+#include "arrow/util/checked_cast.h"
 #include "arrow/util/logging.h"
 #include "arrow/visitor.h"
 
@@ -66,6 +67,43 @@ static int64_t GetOutputLength(int64_t nbytes) {
 static Status WritePadded(io::OutputStream* stream, const uint8_t* data, int64_t length,
                           int64_t* bytes_written) {
   RETURN_NOT_OK(stream->Write(data, length));
+
+  int64_t remainder = PaddedLength(length) - length;
+  if (remainder != 0) {
+    RETURN_NOT_OK(stream->Write(kPaddingBytes, remainder));
+  }
+  *bytes_written = length + remainder;
+  return Status::OK();
+}
+
+static Status WritePaddedWithOffset(io::OutputStream* stream, const uint8_t* data,
+                                    int64_t bit_offset, const int64_t length,
+                                    int64_t* bytes_written) {
+  data = data + bit_offset / 8;
+  uint8_t bit_shift = static_cast<uint8_t>(bit_offset % 8);
+  if (bit_offset == 0) {
+    RETURN_NOT_OK(stream->Write(data, length));
+  } else {
+    constexpr int64_t buffersize = 256;
+    uint8_t buffer[buffersize];
+    const uint8_t lshift = static_cast<uint8_t>(8 - bit_shift);
+    const uint8_t* buffer_end = buffer + buffersize;
+    uint8_t* buffer_it = buffer;
+
+    for (const uint8_t* end = data + length; data != end;) {
+      uint8_t r = static_cast<uint8_t>(*data++ >> bit_shift);
+      uint8_t l = static_cast<uint8_t>(*data << lshift);
+      uint8_t value = l | r;
+      *buffer_it++ = value;
+      if (buffer_it == buffer_end) {
+        RETURN_NOT_OK(stream->Write(buffer, buffersize));
+        buffer_it = buffer;
+      }
+    }
+    if (buffer_it != buffer) {
+      RETURN_NOT_OK(stream->Write(buffer, buffer_it - buffer));
+    }
+  }
 
   int64_t remainder = PaddedLength(length) - length;
   if (remainder != 0) {
@@ -246,7 +284,7 @@ class TableReader::TableReaderImpl {
     }
 
     std::shared_ptr<Buffer> buffer;
-    RETURN_NOT_OK(source->Read(magic_size, &buffer));
+    RETURN_NOT_OK(source->ReadAt(0, magic_size, &buffer));
 
     if (memcmp(buffer->data(), kFeatherMagicBytes, magic_size)) {
       return Status::Invalid("Not a feather file");
@@ -554,12 +592,14 @@ class TableWriter::TableWriterImpl : public ArrayVisitor {
 
     // Write the null bitmask
     if (values.null_count() > 0) {
-      // We assume there is one bit for each value in values.nulls, aligned on a
-      // byte boundary, and we write this much data into the stream
+      // We assume there is one bit for each value in values.nulls,
+      // starting at the zero offset.
       int64_t null_bitmap_size = GetOutputLength(BitUtil::BytesForBits(values.length()));
       if (values.null_bitmap()) {
-        RETURN_NOT_OK(WritePadded(stream_.get(), values.null_bitmap()->data(),
-                                  null_bitmap_size, &bytes_written));
+        auto null_bitmap = values.null_bitmap();
+        RETURN_NOT_OK(WritePaddedWithOffset(stream_.get(), null_bitmap->data(),
+                                            values.offset(), null_bitmap_size,
+                                            &bytes_written));
       } else {
         RETURN_NOT_OK(WritePaddedBlank(stream_.get(), null_bitmap_size, &bytes_written));
       }
@@ -567,11 +607,12 @@ class TableWriter::TableWriterImpl : public ArrayVisitor {
     }
 
     int64_t values_bytes = 0;
+    int64_t bit_offset = 0;
 
     const uint8_t* values_buffer = nullptr;
 
     if (is_binary_like(values.type_id())) {
-      const auto& bin_values = static_cast<const BinaryArray&>(values);
+      const auto& bin_values = checked_cast<const BinaryArray&>(values);
 
       int64_t offset_bytes = sizeof(int32_t) * (values.length() + 1);
 
@@ -592,23 +633,20 @@ class TableWriter::TableWriterImpl : public ArrayVisitor {
         values_buffer = bin_values.value_data()->data();
       }
     } else {
-      const auto& prim_values = static_cast<const PrimitiveArray&>(values);
-      const auto& fw_type = static_cast<const FixedWidthType&>(*values.type());
+      const auto& prim_values = checked_cast<const PrimitiveArray&>(values);
+      const auto& fw_type = checked_cast<const FixedWidthType&>(*values.type());
 
-      if (values.type_id() == Type::BOOL) {
-        // Booleans are bit-packed
-        values_bytes = BitUtil::BytesForBits(values.length());
-      } else {
-        values_bytes = values.length() * fw_type.bit_width() / 8;
-      }
+      values_bytes = BitUtil::BytesForBits(values.length() * fw_type.bit_width());
 
       if (prim_values.values()) {
-        values_buffer = prim_values.values()->data();
+        values_buffer = prim_values.values()->data() +
+                        (prim_values.offset() * fw_type.bit_width() / 8);
+        bit_offset = (prim_values.offset() * fw_type.bit_width()) % 8;
       }
     }
     if (values_buffer) {
-      RETURN_NOT_OK(
-          WritePadded(stream_.get(), values_buffer, values_bytes, &bytes_written));
+      RETURN_NOT_OK(WritePaddedWithOffset(stream_.get(), values_buffer, bit_offset,
+                                          values_bytes, &bytes_written));
     } else {
       RETURN_NOT_OK(WritePaddedBlank(stream_.get(), values_bytes, &bytes_written));
     }
@@ -651,7 +689,7 @@ class TableWriter::TableWriterImpl : public ArrayVisitor {
 #undef VISIT_PRIMITIVE
 
   Status Visit(const DictionaryArray& values) override {
-    const auto& dict_type = static_cast<const DictionaryType&>(*values.type());
+    const auto& dict_type = checked_cast<const DictionaryType&>(*values.type());
 
     if (!is_integer(values.indices()->type_id())) {
       return Status::Invalid("Category values must be integers");
@@ -670,7 +708,7 @@ class TableWriter::TableWriterImpl : public ArrayVisitor {
 
   Status Visit(const TimestampArray& values) override {
     RETURN_NOT_OK(WritePrimitiveValues(values));
-    const auto& ts_type = static_cast<const TimestampType&>(*values.type());
+    const auto& ts_type = checked_cast<const TimestampType&>(*values.type());
     current_column_->SetTimestamp(ts_type.unit(), ts_type.timezone());
     return Status::OK();
   }
@@ -683,7 +721,7 @@ class TableWriter::TableWriterImpl : public ArrayVisitor {
 
   Status Visit(const Time32Array& values) override {
     RETURN_NOT_OK(WritePrimitiveValues(values));
-    auto unit = static_cast<const Time32Type&>(*values.type()).unit();
+    auto unit = checked_cast<const Time32Type&>(*values.type()).unit();
     current_column_->SetTime(unit);
     return Status::OK();
   }

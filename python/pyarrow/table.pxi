@@ -27,6 +27,8 @@ except ImportError:
 else:
     import pyarrow.pandas_compat as pdcompat
 
+from .util import _deprecate_nthreads
+
 
 cdef class ChunkedArray:
     """
@@ -271,12 +273,21 @@ cdef class Column:
     def __repr__(self):
         from pyarrow.compat import StringIO
         result = StringIO()
-        result.write(object.__repr__(self))
+        result.write('<Column name={0!r} type={1!r}>'
+                     .format(self.name, self.type))
         data = self.data
         for i, chunk in enumerate(data.chunks):
             result.write('\nchunk {0}: {1}'.format(i, repr(chunk)))
 
         return result.getvalue()
+
+    def __richcmp__(Column self, Column other, int op):
+        if op == cp.Py_EQ:
+            return self.equals(other)
+        elif op == cp.Py_NE:
+            return not self.equals(other)
+        else:
+            raise TypeError('Invalid comparison')
 
     @staticmethod
     def from_array(*args):
@@ -315,6 +326,29 @@ cdef class Column:
         casted_data = pyarrow_wrap_chunked_array(out.chunked_array())
         return column(self.name, casted_data)
 
+    def flatten(self, MemoryPool memory_pool=None):
+        """
+        Flatten this Column.  If it has a struct type, the column is
+        flattened into one column per struct field.
+
+        Parameters
+        ----------
+        memory_pool : MemoryPool, default None
+            For memory allocations, if required, otherwise use default pool
+
+        Returns
+        -------
+        result : List[Column]
+        """
+        cdef:
+            vector[shared_ptr[CColumn]] flattened
+            CMemoryPool* pool = maybe_unbox_memory_pool(memory_pool)
+
+        with nogil:
+            check_status(self.column.Flatten(pool, &flattened))
+
+        return [pyarrow_wrap_column(col) for col in flattened]
+
     def to_pandas(self,
                   c_bool strings_to_categorical=False,
                   c_bool zero_copy_only=False,
@@ -333,7 +367,8 @@ cdef class Column:
         options = PandasOptions(
             strings_to_categorical=strings_to_categorical,
             zero_copy_only=zero_copy_only,
-            integer_object_nulls=integer_object_nulls)
+            integer_object_nulls=integer_object_nulls,
+            use_threads=False)
 
         with nogil:
             check_status(libarrow.ConvertColumnToPandas(options,
@@ -714,7 +749,7 @@ cdef class RecordBatch:
             entries.append((name, column))
         return OrderedDict(entries)
 
-    def to_pandas(self, nthreads=None):
+    def to_pandas(self, nthreads=None, use_threads=False):
         """
         Convert the arrow::RecordBatch to a pandas DataFrame
 
@@ -722,11 +757,12 @@ cdef class RecordBatch:
         -------
         pandas.DataFrame
         """
-        return Table.from_batches([self]).to_pandas(nthreads=nthreads)
+        use_threads = _deprecate_nthreads(use_threads, nthreads)
+        return Table.from_batches([self]).to_pandas(use_threads=use_threads)
 
     @classmethod
     def from_pandas(cls, df, Schema schema=None, bint preserve_index=True,
-                    nthreads=None):
+                    nthreads=None, columns=None):
         """
         Convert pandas.DataFrame to an Arrow RecordBatch
 
@@ -742,13 +778,15 @@ cdef class RecordBatch:
         nthreads : int, default None (may use up to system CPU count threads)
             If greater than 1, convert columns to Arrow in parallel using
             indicated number of threads
+        columns : list, optional
+           List of column to be converted. If None, use all columns.
 
         Returns
         -------
         pyarrow.RecordBatch
         """
         names, arrays, metadata = pdcompat.dataframe_to_arrays(
-            df, schema, preserve_index, nthreads=nthreads
+            df, schema, preserve_index, nthreads=nthreads, columns=columns
         )
         return cls.from_arrays(arrays, names, metadata)
 
@@ -791,7 +829,7 @@ cdef class RecordBatch:
             CRecordBatch.Make(schema, num_rows, c_arrays))
 
 
-def table_to_blocks(PandasOptions options, Table table, int nthreads,
+def table_to_blocks(PandasOptions options, Table table,
                     MemoryPool memory_pool, categories):
     cdef:
         PyObject* result_obj
@@ -806,9 +844,7 @@ def table_to_blocks(PandasOptions options, Table table, int nthreads,
     with nogil:
         check_status(
             libarrow.ConvertTableToPandas(
-                options, categorical_columns, c_table, nthreads, pool,
-                &result_obj
-            )
+                options, categorical_columns, c_table, pool, &result_obj)
         )
 
     return PyObject_to_object(result_obj)
@@ -841,6 +877,14 @@ cdef class Table:
             )
         return 0
 
+    def _validate(self):
+        """
+        Validate table consistency.
+        """
+        self._check_nullptr()
+        with nogil:
+            check_status(self.table.Validate())
+
     def replace_schema_metadata(self, dict metadata=None):
         """
         EXPERIMENTAL: Create shallow copy of table by replacing schema
@@ -864,6 +908,29 @@ cdef class Table:
             new_table = self.table.ReplaceSchemaMetadata(c_meta)
 
         return pyarrow_wrap_table(new_table)
+
+    def flatten(self, MemoryPool memory_pool=None):
+        """
+        Flatten this Table.  Each column with a struct type is flattened
+        into one column per struct field.  Other columns are left unchanged.
+
+        Parameters
+        ----------
+        memory_pool : MemoryPool, default None
+            For memory allocations, if required, otherwise use default pool
+
+        Returns
+        -------
+        result : Table
+        """
+        cdef:
+            shared_ptr[CTable] flattened
+            CMemoryPool* pool = maybe_unbox_memory_pool(memory_pool)
+
+        with nogil:
+            check_status(self.table.Flatten(pool, &flattened))
+
+        return pyarrow_wrap_table(flattened)
 
     def equals(self, Table other):
         """
@@ -892,7 +959,7 @@ cdef class Table:
 
     @classmethod
     def from_pandas(cls, df, Schema schema=None, bint preserve_index=True,
-                    nthreads=None):
+                    nthreads=None, columns=None):
         """
         Convert pandas.DataFrame to an Arrow Table
 
@@ -908,6 +975,9 @@ cdef class Table:
         nthreads : int, default None (may use up to system CPU count threads)
             If greater than 1, convert columns to Arrow in parallel using
             indicated number of threads
+        columns : list, optional
+           List of column to be converted. If None, use all columns.
+
 
         Returns
         -------
@@ -929,7 +999,8 @@ cdef class Table:
             df,
             schema=schema,
             preserve_index=preserve_index,
-            nthreads=nthreads
+            nthreads=nthreads,
+            columns=columns
         )
         return cls.from_arrays(arrays, names=names, metadata=metadata)
 
@@ -1079,16 +1150,12 @@ cdef class Table:
 
     def to_pandas(self, nthreads=None, strings_to_categorical=False,
                   memory_pool=None, zero_copy_only=False, categories=None,
-                  integer_object_nulls=False):
+                  integer_object_nulls=False, use_threads=False):
         """
         Convert the arrow::Table to a pandas DataFrame
 
         Parameters
         ----------
-        nthreads : int, default max(1, multiprocessing.cpu_count() / 2)
-            For the default, we divide the CPU count by 2 because most modern
-            computers have hyperthreading turned on, so doubling the CPU count
-            beyond the number of physical cores does not help
         strings_to_categorical : boolean, default False
             Encode string (UTF8) and binary types to pandas.Categorical
         memory_pool: MemoryPool, optional
@@ -1100,6 +1167,8 @@ cdef class Table:
             List of columns that should be returned as pandas.Categorical
         integer_object_nulls : boolean, default False
             Cast integers with nulls to objects
+        use_threads: boolean, default False
+            Whether to parallelize the conversion using multiple threads
 
         Returns
         -------
@@ -1108,15 +1177,16 @@ cdef class Table:
         cdef:
             PandasOptions options
 
+        use_threads = _deprecate_nthreads(use_threads, nthreads)
+
         options = PandasOptions(
             strings_to_categorical=strings_to_categorical,
             zero_copy_only=zero_copy_only,
-            integer_object_nulls=integer_object_nulls)
+            integer_object_nulls=integer_object_nulls,
+            use_threads=use_threads)
         self._check_nullptr()
-        if nthreads is None:
-            nthreads = cpu_count()
         mgr = pdcompat.table_to_blockmanager(options, self, memory_pool,
-                                             nthreads, categories)
+                                             categories)
         return pd.DataFrame(mgr)
 
     def to_pydict(self):
@@ -1152,7 +1222,30 @@ cdef class Table:
         self._check_nullptr()
         return pyarrow_wrap_schema(self.table.schema())
 
-    def column(self, int i):
+    def column(self, i):
+        """
+        Select a column by its column name, or numeric index.
+
+        Parameters
+        ----------
+        i : int or string
+
+        Returns
+        -------
+        pyarrow.Column
+        """
+        if isinstance(i, six.string_types):
+            field_index = self.schema.get_field_index(i)
+            if field_index < 0:
+                raise KeyError("Column {} does not exist in table".format(i))
+            else:
+                return self._column(field_index)
+        elif isinstance(i, six.integer_types):
+            return self._column(i)
+        else:
+            raise TypeError("Index must either be string or integer")
+
+    def _column(self, int i):
         """
         Select a column by its numeric index.
 
@@ -1262,6 +1355,30 @@ cdef class Table:
             check_status(self.table.RemoveColumn(i, &c_table))
 
         return pyarrow_wrap_table(c_table)
+
+    def drop(self, columns):
+        """
+        Drop one or more columns and return a new table.
+
+        columns: list of str
+
+        Returns pa.Table
+        """
+        indices = []
+        for col in columns:
+            idx = self.schema.get_field_index(col)
+            if idx == -1:
+                raise KeyError("Column {!r} not found".format(col))
+            indices.append(idx)
+
+        indices.sort()
+        indices.reverse()
+
+        table = self
+        for idx in indices:
+            table = table.remove_column(idx)
+
+        return table
 
 
 def concat_tables(tables):

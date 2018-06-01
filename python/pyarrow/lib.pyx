@@ -33,35 +33,29 @@ from pyarrow.includes.common cimport PyObject_to_object
 cimport pyarrow.includes.libarrow as libarrow
 cimport cpython as cp
 
-cdef _pandas():
-    import pandas as pd
-    return pd
-
 arrow_init_numpy()
 set_numpy_nan(np.nan)
-
-cdef int CPU_COUNT = int(
-    os.environ.get('OMP_NUM_THREADS',
-                   max(multiprocessing.cpu_count() // 2, 1)))
 
 
 def cpu_count():
     """
-    Returns
-    -------
-    count : Number of CPUs to use by default in parallel operations. Default is
-      max(1, multiprocessing.cpu_count() / 2), but can be overridden by the
-      OMP_NUM_THREADS environment variable. For the default, we divide the CPU
-      count by 2 because most modern computers have hyperthreading turned on,
-      so doubling the CPU count beyond the number of physical cores does not
-      help.
+    Return the number of threads to use in parallel operations.
+
+    The number of threads is determined at startup by inspecting the
+    OMP_NUM_THREADS and OMP_THREAD_LIMIT environment variables.  If neither
+    is present, it will default to the number of hardware threads on the
+    system.  It can be modified at runtime by calling set_cpu_count().
     """
-    return CPU_COUNT
+    return GetCpuThreadPoolCapacity()
 
 
-def set_cpu_count(count):
-    global CPU_COUNT
-    CPU_COUNT = max(int(count), 1)
+def set_cpu_count(int count):
+    """
+    Set the number of threads to use in parallel operations.
+    """
+    if count < 1:
+        raise ValueError("CPU count must be strictly positive")
+    check_status(SetCpuThreadPoolCapacity(count))
 
 
 Type_NA = _Type_NA
@@ -109,6 +103,9 @@ include "scalar.pxi"
 
 # Array types
 include "array.pxi"
+
+# Builders
+include "builder.pxi"
 
 # Column, Table, Record Batch
 include "table.pxi"

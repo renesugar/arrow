@@ -18,6 +18,7 @@
 
 import io.netty.buffer.ArrowBuf;
 import org.apache.arrow.vector.types.Types;
+import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.drill.common.types.TypeProtos.MinorType;
 
 <@pp.dropOutputFile />
@@ -86,7 +87,7 @@ abstract class AbstractPromotableFieldWriter extends AbstractFieldWriter {
 
   <#if minor.class == "Decimal">
   public void writeBigEndianBytesToDecimal(byte[] value) {
-    getWriter(Types.MinorType.DECIMAL).writeBigEndianBytesToDecimal(value);
+    getWriter(MinorType.DECIMAL).writeBigEndianBytesToDecimal(value);
   }
   </#if>
 

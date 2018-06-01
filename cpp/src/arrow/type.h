@@ -28,6 +28,7 @@
 
 #include "arrow/status.h"
 #include "arrow/type_fwd.h"  // IWYU pragma: export
+#include "arrow/util/checked_cast.h"
 #include "arrow/util/key_value_metadata.h"
 #include "arrow/util/macros.h"
 #include "arrow/util/visibility.h"
@@ -140,8 +141,8 @@ class ARROW_EXPORT DataType {
 
   // Return whether the types are equal
   //
-  // Types that are logically convertable from one to another e.g. List<UInt8>
-  // and Binary are NOT equal).
+  // Types that are logically convertible from one to another (e.g. List<UInt8>
+  // and Binary) are NOT equal.
   virtual bool Equals(const DataType& other) const;
   bool Equals(const std::shared_ptr<DataType>& other) const;
 
@@ -232,9 +233,13 @@ class ARROW_EXPORT Field {
 
   std::shared_ptr<const KeyValueMetadata> metadata() const { return metadata_; }
 
+  bool HasMetadata() const;
+
   std::shared_ptr<Field> AddMetadata(
       const std::shared_ptr<const KeyValueMetadata>& metadata) const;
   std::shared_ptr<Field> RemoveMetadata() const;
+
+  std::vector<std::shared_ptr<Field>> Flatten() const;
 
   bool Equals(const Field& other) const;
   bool Equals(const std::shared_ptr<Field>& other) const;
@@ -272,7 +277,7 @@ class ARROW_EXPORT CTypeImpl : public BASE {
   int bit_width() const override { return static_cast<int>(sizeof(C_TYPE) * CHAR_BIT); }
 
   Status Accept(TypeVisitor* visitor) const override {
-    return visitor->Visit(*static_cast<const DERIVED*>(this));
+    return visitor->Visit(checked_cast<const DERIVED&>(*this));
   }
 
   std::string ToString() const override { return this->name(); }
@@ -437,8 +442,8 @@ class ARROW_EXPORT FixedSizeBinaryType : public FixedWidthType, public Parametri
 
   explicit FixedSizeBinaryType(int32_t byte_width)
       : FixedWidthType(Type::FIXED_SIZE_BINARY), byte_width_(byte_width) {}
-  explicit FixedSizeBinaryType(int32_t byte_width, Type::type type_id)
-      : FixedWidthType(type_id), byte_width_(byte_width) {}
+  explicit FixedSizeBinaryType(int32_t byte_width, Type::type override_type_id)
+      : FixedWidthType(override_type_id), byte_width_(byte_width) {}
 
   Status Accept(TypeVisitor* visitor) const override;
   std::string ToString() const override;
@@ -475,6 +480,16 @@ class ARROW_EXPORT StructType : public NestedType {
   Status Accept(TypeVisitor* visitor) const override;
   std::string ToString() const override;
   std::string name() const override { return "struct"; }
+
+  /// Returns null if name not found
+  std::shared_ptr<Field> GetChildByName(const std::string& name) const;
+
+  /// Returns -1 if name not found
+  int GetChildIndex(const std::string& name) const;
+
+ private:
+  /// Lazily initialized mapping
+  mutable std::unordered_map<std::string, int> name_to_index_;
 };
 
 class ARROW_EXPORT DecimalType : public FixedSizeBinaryType {
@@ -737,7 +752,7 @@ class ARROW_EXPORT Schema {
   virtual ~Schema() = default;
 
   /// Returns true if all of the schema fields are equal
-  bool Equals(const Schema& other) const;
+  bool Equals(const Schema& other, bool check_metadata = true) const;
 
   /// Return the ith schema element. Does not boundscheck
   std::shared_ptr<Field> field(int i) const { return fields_[i]; }
@@ -772,11 +787,16 @@ class ARROW_EXPORT Schema {
   /// \brief Return copy of Schema without the KeyValueMetadata
   std::shared_ptr<Schema> RemoveMetadata() const;
 
+  /// \brief Indicates that Schema has non-empty KevValueMetadata
+  bool HasMetadata() const;
+
   /// \brief Return the number of fields (columns) in the schema
   int num_fields() const { return static_cast<int>(fields_.size()); }
 
  private:
   std::vector<std::shared_ptr<Field>> fields_;
+
+  /// Lazily initialized mapping
   mutable std::unordered_map<std::string, int> name_to_index_;
 
   std::shared_ptr<const KeyValueMetadata> metadata_;

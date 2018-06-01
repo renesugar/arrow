@@ -100,8 +100,8 @@ def assert_equal(obj1, obj2):
         for i in range(len(obj1)):
             assert_equal(obj1[i], obj2[i])
     else:
-        assert obj1 == obj2, ("Objects {} and {} are different."
-                              .format(obj1, obj2))
+        assert type(obj1) == type(obj2) and obj1 == obj2, \
+                "Objects {} and {} are different.".format(obj1, obj2)
 
 
 PRIMITIVE_OBJECTS = [
@@ -315,8 +315,11 @@ def test_default_dict_serialization(large_buffer):
 
 def test_numpy_serialization(large_buffer):
     for t in ["bool", "int8", "uint8", "int16", "uint16", "int32",
-              "uint32", "float16", "float32", "float64"]:
+              "uint32", "float16", "float32", "float64", "<U1", "<U2", "<U3",
+              "<U4", "|S1", "|S2", "|S3", "|S4", "|O"]:
         obj = np.random.randint(0, 10, size=(100, 100)).astype(t)
+        serialization_roundtrip(obj, large_buffer)
+        obj = obj[1:99, 10:90]
         serialization_roundtrip(obj, large_buffer)
 
 
@@ -589,7 +592,7 @@ def test_serialize_to_components_invalid_cases():
         'data': [buf]
     }
 
-    with pytest.raises(pa.ArrowException):
+    with pytest.raises(pa.ArrowInvalid):
         pa.deserialize_components(components)
 
     components = {
@@ -598,7 +601,7 @@ def test_serialize_to_components_invalid_cases():
         'data': [buf, buf]
     }
 
-    with pytest.raises(pa.ArrowException):
+    with pytest.raises(pa.ArrowInvalid):
         pa.deserialize_components(components)
 
 

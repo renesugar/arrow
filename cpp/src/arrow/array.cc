@@ -31,6 +31,7 @@
 #include "arrow/status.h"
 #include "arrow/type_traits.h"
 #include "arrow/util/bit-util.h"
+#include "arrow/util/checked_cast.h"
 #include "arrow/util/decimal.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/macros.h"
@@ -52,6 +53,15 @@ std::shared_ptr<ArrayData> ArrayData::Make(
     const std::vector<std::shared_ptr<Buffer>>& buffers, int64_t null_count,
     int64_t offset) {
   return std::make_shared<ArrayData>(type, length, buffers, null_count, offset);
+}
+
+std::shared_ptr<ArrayData> ArrayData::Make(
+    const std::shared_ptr<DataType>& type, int64_t length,
+    const std::vector<std::shared_ptr<Buffer>>& buffers,
+    const std::vector<std::shared_ptr<ArrayData>>& child_data, int64_t null_count,
+    int64_t offset) {
+  return std::make_shared<ArrayData>(type, length, buffers, child_data, null_count,
+                                     offset);
 }
 
 std::shared_ptr<ArrayData> ArrayData::Make(const std::shared_ptr<DataType>& type,
@@ -199,7 +209,7 @@ Status ListArray::FromArrays(const Array& offsets, const Array& values, MemoryPo
 
   BufferVector buffers = {};
 
-  const auto& typed_offsets = static_cast<const Int32Array&>(offsets);
+  const auto& typed_offsets = checked_cast<const Int32Array&>(offsets);
 
   const int64_t num_offsets = offsets.length();
 
@@ -250,11 +260,13 @@ void ListArray::SetData(const std::shared_ptr<ArrayData>& data) {
   raw_value_offsets_ = value_offsets == nullptr
                            ? nullptr
                            : reinterpret_cast<const int32_t*>(value_offsets->data());
+
+  DCHECK_EQ(data_->child_data.size(), 1);
   values_ = MakeArray(data_->child_data[0]);
 }
 
 std::shared_ptr<DataType> ListArray::value_type() const {
-  return static_cast<const ListType&>(*type()).value_type();
+  return checked_cast<const ListType&>(*type()).value_type();
 }
 
 std::shared_ptr<Array> ListArray::values() const { return values_; }
@@ -318,7 +330,7 @@ FixedSizeBinaryArray::FixedSizeBinaryArray(const std::shared_ptr<DataType>& type
                                            const std::shared_ptr<Buffer>& null_bitmap,
                                            int64_t null_count, int64_t offset)
     : PrimitiveArray(type, length, data, null_bitmap, null_count, offset),
-      byte_width_(static_cast<const FixedSizeBinaryType&>(*type).byte_width()) {}
+      byte_width_(checked_cast<const FixedSizeBinaryType&>(*type).byte_width()) {}
 
 const uint8_t* FixedSizeBinaryArray::GetValue(int64_t i) const {
   return raw_values_ + (i + data_->offset) * byte_width_;
@@ -333,7 +345,7 @@ Decimal128Array::Decimal128Array(const std::shared_ptr<ArrayData>& data)
 }
 
 std::string Decimal128Array::FormatValue(int64_t i) const {
-  const auto& type_ = static_cast<const Decimal128Type&>(*type());
+  const auto& type_ = checked_cast<const Decimal128Type&>(*type());
   const Decimal128 value(GetValue(i));
   return value.ToString(type_.scale());
 }
@@ -370,6 +382,53 @@ std::shared_ptr<Array> StructArray::field(int i) const {
   }
   DCHECK(boxed_fields_[i]);
   return boxed_fields_[i];
+}
+
+Status StructArray::Flatten(MemoryPool* pool, ArrayVector* out) const {
+  ArrayVector flattened;
+  std::shared_ptr<Buffer> null_bitmap = data_->buffers[0];
+
+  for (auto& child_data : data_->child_data) {
+    std::shared_ptr<Buffer> flattened_null_bitmap;
+    int64_t flattened_null_count = kUnknownNullCount;
+
+    // Need to adjust for parent offset
+    if (data_->offset != 0 || data_->length != child_data->length) {
+      child_data = SliceData(*child_data, data_->offset, data_->length);
+    }
+    std::shared_ptr<Buffer> child_null_bitmap = child_data->buffers[0];
+    const int64_t child_offset = child_data->offset;
+
+    // The validity of a flattened datum is the logical AND of the struct
+    // element's validity and the individual field element's validity.
+    if (null_bitmap && child_null_bitmap) {
+      RETURN_NOT_OK(BitmapAnd(pool, child_null_bitmap->data(), child_offset,
+                              null_bitmap_data_, data_->offset, data_->length,
+                              child_offset, &flattened_null_bitmap));
+    } else if (child_null_bitmap) {
+      flattened_null_bitmap = child_null_bitmap;
+      flattened_null_count = child_data->null_count;
+    } else if (null_bitmap) {
+      if (child_offset == data_->offset) {
+        flattened_null_bitmap = null_bitmap;
+      } else {
+        RETURN_NOT_OK(CopyBitmap(pool, null_bitmap_data_, data_->offset, data_->length,
+                                 &flattened_null_bitmap));
+      }
+      flattened_null_count = data_->null_count;
+    } else {
+      flattened_null_count = 0;
+    }
+
+    auto flattened_data = child_data->Copy();
+    flattened_data->buffers[0] = flattened_null_bitmap;
+    flattened_data->null_count = flattened_null_count;
+
+    flattened.push_back(MakeArray(flattened_data));
+  }
+
+  *out = flattened;
+  return Status::OK();
 }
 
 // ----------------------------------------------------------------------
@@ -429,8 +488,8 @@ Status UnionArray::MakeDense(const Array& type_ids, const Array& value_offsets,
   }
 
   BufferVector buffers = {type_ids.null_bitmap(),
-                          static_cast<const UInt8Array&>(type_ids).values(),
-                          static_cast<const Int32Array&>(value_offsets).values()};
+                          checked_cast<const Int8Array&>(type_ids).values(),
+                          checked_cast<const Int32Array&>(value_offsets).values()};
   auto union_type = union_(children, UnionMode::DENSE);
   auto internal_data = ArrayData::Make(union_type, type_ids.length(), std::move(buffers),
                                        type_ids.null_count(), type_ids.offset());
@@ -448,7 +507,7 @@ Status UnionArray::MakeSparse(const Array& type_ids,
     return Status::Invalid("UnionArray type_ids must be signed int8");
   }
   BufferVector buffers = {type_ids.null_bitmap(),
-                          static_cast<const UInt8Array&>(type_ids).values(), nullptr};
+                          checked_cast<const Int8Array&>(type_ids).values(), nullptr};
   auto union_type = union_(children, UnionMode::SPARSE);
   auto internal_data = ArrayData::Make(union_type, type_ids.length(), std::move(buffers),
                                        type_ids.null_count(), type_ids.offset());
@@ -465,7 +524,16 @@ Status UnionArray::MakeSparse(const Array& type_ids,
 
 std::shared_ptr<Array> UnionArray::child(int i) const {
   if (!boxed_fields_[i]) {
-    boxed_fields_[i] = MakeArray(data_->child_data[i]);
+    std::shared_ptr<ArrayData> child_data = data_->child_data[i];
+    if (mode() == UnionMode::SPARSE) {
+      // Sparse union: need to adjust child if union is sliced
+      // (for dense unions, the need to lookup through the offsets
+      //  makes this unnecessary)
+      if (data_->offset != 0 || child_data->length > data_->length) {
+        child_data = SliceData(*child_data.get(), data_->offset, data_->length);
+      }
+    }
+    boxed_fields_[i] = MakeArray(child_data);
   }
   DCHECK(boxed_fields_[i]);
   return boxed_fields_[i];
@@ -492,7 +560,7 @@ template <typename ArrowType>
 Status ValidateDictionaryIndices(const std::shared_ptr<Array>& indices,
                                  const int64_t upper_bound) {
   using ArrayType = typename TypeTraits<ArrowType>::ArrayType;
-  const auto& array = static_cast<const ArrayType&>(*indices);
+  const auto& array = checked_cast<const ArrayType&>(*indices);
   const typename ArrowType::c_type* data = array.raw_values();
   const int64_t size = array.length();
 
@@ -516,14 +584,14 @@ Status ValidateDictionaryIndices(const std::shared_ptr<Array>& indices,
 }
 
 DictionaryArray::DictionaryArray(const std::shared_ptr<ArrayData>& data)
-    : dict_type_(static_cast<const DictionaryType*>(data->type.get())) {
+    : dict_type_(checked_cast<const DictionaryType*>(data->type.get())) {
   DCHECK_EQ(data->type->id(), Type::DICTIONARY);
   SetData(data);
 }
 
 DictionaryArray::DictionaryArray(const std::shared_ptr<DataType>& type,
                                  const std::shared_ptr<Array>& indices)
-    : dict_type_(static_cast<const DictionaryType*>(type.get())) {
+    : dict_type_(checked_cast<const DictionaryType*>(type.get())) {
   DCHECK_EQ(type->id(), Type::DICTIONARY);
   DCHECK_EQ(indices->type_id(), dict_type_->index_type()->id());
   auto data = indices->data()->Copy();
@@ -534,12 +602,8 @@ DictionaryArray::DictionaryArray(const std::shared_ptr<DataType>& type,
 Status DictionaryArray::FromArrays(const std::shared_ptr<DataType>& type,
                                    const std::shared_ptr<Array>& indices,
                                    std::shared_ptr<Array>* out) {
-  if (indices->length() == 0) {
-    return Status::Invalid("Dictionary indices must have non-zero length");
-  }
-
   DCHECK_EQ(type->id(), Type::DICTIONARY);
-  const auto& dict = static_cast<const DictionaryType&>(*type);
+  const auto& dict = checked_cast<const DictionaryType&>(*type);
   DCHECK_EQ(indices->type_id(), dict.index_type()->id());
 
   int64_t upper_bound = dict.dictionary()->length();

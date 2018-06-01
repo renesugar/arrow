@@ -56,6 +56,39 @@ def _read_table(*args, **kwargs):
     return pq.read_table(*args, **kwargs)
 
 
+def _roundtrip_table(table, **params):
+    buf = io.BytesIO()
+    _write_table(table, buf, **params)
+    buf.seek(0)
+
+    return _read_table(buf)
+
+
+def _check_roundtrip(table, expected=None, **params):
+    if expected is None:
+        expected = table
+
+    result = _roundtrip_table(table, **params)
+    if not result.equals(expected):
+        print(expected)
+        print(result)
+        assert result.equals(expected)
+
+    result = _roundtrip_table(result, **params)
+    assert result.equals(expected)
+
+
+def _roundtrip_pandas_dataframe(df, write_kwargs):
+    table = pa.Table.from_pandas(df)
+
+    buf = io.BytesIO()
+    _write_table(table, buf, **write_kwargs)
+
+    buf.seek(0)
+    table1 = _read_table(buf)
+    return table1.to_pandas()
+
+
 @parquet
 def test_single_pylist_column_roundtrip(tmpdir):
     for dtype in [int, float]:
@@ -76,7 +109,7 @@ def test_single_pylist_column_roundtrip(tmpdir):
 
 def alltypes_sample(size=10000, seed=0):
     np.random.seed(seed)
-    df = pd.DataFrame({
+    arrays = {
         'uint8': np.arange(size, dtype=np.uint8),
         'uint16': np.arange(size, dtype=np.uint16),
         'uint32': np.arange(size, dtype=np.uint32),
@@ -93,10 +126,12 @@ def alltypes_sample(size=10000, seed=0):
         'datetime': np.arange("2016-01-01T00:00:00.001", size,
                               dtype='datetime64[ms]'),
         'str': [str(x) for x in range(size)],
+        'empty_str': [''] * size,
         'str_with_nulls': [None] + [str(x) for x in range(size - 2)] + [None],
-        'empty_str': [''] * size
-    })
-    return df
+        'null': [None] * size,
+        'null_list': [None] * 2 + [[None] * (x % 4) for x in range(size - 2)],
+    }
+    return pd.DataFrame(arrays)
 
 
 @parquet
@@ -134,6 +169,23 @@ def test_chunked_table_write(tmpdir):
     df, _ = dataframe_with_lists()
     batch = pa.RecordBatch.from_pandas(df)
     table = pa.Table.from_batches([batch] * 3)
+    _check_roundtrip(table, version='2.0')
+
+
+@parquet
+def test_empty_table_roundtrip(tmpdir):
+    df = alltypes_sample(size=10)
+    # The nanosecond->us conversion is a nuisance, so we just avoid it here
+    del df['datetime']
+
+    # Create a non-empty table to infer the types correctly, then slice to 0
+    table = pa.Table.from_pandas(df)
+    table = pa.Table.from_arrays(
+        [col.data.chunk(0)[:0] for col in table.itercolumns()],
+        names=table.schema.names)
+
+    assert table.schema.field_by_name('null').type == pa.null()
+    assert table.schema.field_by_name('null_list').type == pa.list_(pa.null())
     _check_roundtrip(table, version='2.0')
 
 
@@ -446,7 +498,7 @@ def test_pandas_parquet_configuration_options(tmpdir):
         df_read = table_read.to_pandas()
         tm.assert_frame_equal(df, df_read)
 
-    for compression in ['NONE', 'SNAPPY', 'GZIP']:
+    for compression in ['NONE', 'SNAPPY', 'GZIP', 'LZ4']:
         _write_table(arrow_table, filename.strpath,
                      version="2.0",
                      compression=compression)
@@ -535,7 +587,7 @@ def test_parquet_metadata_api():
         ([-1.1, 2.2, 2.3, None, 4.4], np.float64, -1.1, 4.4, 1, 4),
         (
             [u'', u'b', unichar(1000), None, u'aaa'],
-            str, b' ', (unichar(1000) + u' ').encode('utf-8'), 1, 4
+            object, b'', unichar(1000).encode('utf-8'), 1, 4
         ),
         ([True, False, False, True, True], np.bool, False, True, 0, 5),
     ]
@@ -765,17 +817,6 @@ def test_sanitized_spark_field_names():
     assert result.schema[0].name == expected_name
 
 
-def _roundtrip_pandas_dataframe(df, write_kwargs):
-    table = pa.Table.from_pandas(df)
-
-    buf = io.BytesIO()
-    _write_table(table, buf, **write_kwargs)
-
-    buf.seek(0)
-    table1 = _read_table(buf)
-    return table1.to_pandas()
-
-
 @parquet
 def test_spark_flavor_preserves_pandas_metadata():
     df = _test_dataframe(size=100)
@@ -796,22 +837,6 @@ def test_fixed_size_binary():
     table = pa.Table.from_arrays([a0],
                                  ['binary[10]'])
     _check_roundtrip(table)
-
-
-def _roundtrip_table(table, **params):
-    buf = io.BytesIO()
-    _write_table(table, buf, **params)
-    buf.seek(0)
-
-    return _read_table(buf)
-
-
-def _check_roundtrip(table, expected=None, **params):
-    if expected is None:
-        expected = table
-
-    result = _roundtrip_table(table, **params)
-    assert result.equals(expected)
 
 
 @parquet
@@ -994,6 +1019,192 @@ def test_read_partitioned_directory(tmpdir):
     base_path = str(tmpdir)
 
     _partition_test_for_filesystem(fs, base_path)
+
+
+@parquet
+def test_equivalency(tmpdir):
+    fs = LocalFileSystem.get_instance()
+    base_path = str(tmpdir)
+
+    import pyarrow.parquet as pq
+
+    integer_keys = [0, 1]
+    string_keys = ['a', 'b', 'c']
+    boolean_keys = [True, False]
+    partition_spec = [
+        ['integer', integer_keys],
+        ['string', string_keys],
+        ['boolean', boolean_keys]
+    ]
+
+    df = pd.DataFrame({
+        'integer': np.array(integer_keys, dtype='i4').repeat(15),
+        'string': np.tile(np.tile(np.array(string_keys, dtype=object), 5), 2),
+        'boolean': np.tile(np.tile(np.array(boolean_keys, dtype='bool'), 5),
+                           3),
+    }, columns=['integer', 'string', 'boolean'])
+
+    _generate_partition_directories(fs, base_path, partition_spec, df)
+
+    dataset = pq.ParquetDataset(
+        base_path, filesystem=fs,
+        filters=[('integer', '=', 1), ('string', '!=', 'b'),
+                 ('boolean', '==', True)]
+    )
+    table = dataset.read()
+    result_df = (table.to_pandas().reset_index(drop=True))
+
+    assert 0 not in result_df['integer'].values
+    assert 'b' not in result_df['string'].values
+    assert False not in result_df['boolean'].values
+
+    @parquet
+    def test_cutoff_exclusive_integer(tmpdir):
+        fs = LocalFileSystem.get_instance()
+        base_path = str(tmpdir)
+
+        import pyarrow.parquet as pq
+
+        integer_keys = [0, 1, 2, 3, 4]
+        partition_spec = [
+            ['integers', integer_keys],
+        ]
+        N = 5
+
+        df = pd.DataFrame({
+            'index': np.arange(N),
+            'integers': np.array(integer_keys, dtype='i4'),
+        }, columns=['index', 'integers'])
+
+        _generate_partition_directories(fs, base_path, partition_spec, df)
+
+        dataset = pq.ParquetDataset(
+            base_path, filesystem=fs,
+            filters=[
+                ('integers', '<', 4),
+                ('integers', '>', 1),
+            ]
+        )
+        table = dataset.read()
+        result_df = (table.to_pandas()
+                          .sort_values(by='index')
+                          .reset_index(drop=True))
+
+        result_list = [x for x in map(int, result_df['integers'].values)]
+        assert result_list == [2, 3]
+
+
+@parquet
+@pytest.mark.xfail(
+    raises=TypeError,
+    reason='Loss of type information in creation of categoricals.'
+)
+def test_cutoff_exclusive_datetime(tmpdir):
+    fs = LocalFileSystem.get_instance()
+    base_path = str(tmpdir)
+
+    import pyarrow.parquet as pq
+
+    date_keys = [
+        datetime.date(2018, 4, 9),
+        datetime.date(2018, 4, 10),
+        datetime.date(2018, 4, 11),
+        datetime.date(2018, 4, 12),
+        datetime.date(2018, 4, 13)
+    ]
+    partition_spec = [
+        ['dates', date_keys]
+    ]
+    N = 5
+
+    df = pd.DataFrame({
+        'index': np.arange(N),
+        'dates': np.array(date_keys, dtype='datetime64'),
+    }, columns=['index', 'dates'])
+
+    _generate_partition_directories(fs, base_path, partition_spec, df)
+
+    dataset = pq.ParquetDataset(
+        base_path, filesystem=fs,
+        filters=[
+            ('dates', '<', "2018-04-12"),
+            ('dates', '>', "2018-04-10")
+        ]
+    )
+    table = dataset.read()
+    result_df = (table.to_pandas()
+                      .sort_values(by='index')
+                      .reset_index(drop=True))
+
+    expected = pd.Categorical(
+        np.array([datetime.date(2018, 4, 11)], dtype='datetime64'),
+        categories=np.array(date_keys, dtype='datetime64'))
+
+    assert result_df['dates'].values == expected
+
+
+@parquet
+def test_inclusive_integer(tmpdir):
+    fs = LocalFileSystem.get_instance()
+    base_path = str(tmpdir)
+
+    import pyarrow.parquet as pq
+
+    integer_keys = [0, 1, 2, 3, 4]
+    partition_spec = [
+        ['integers', integer_keys],
+    ]
+    N = 5
+
+    df = pd.DataFrame({
+        'index': np.arange(N),
+        'integers': np.array(integer_keys, dtype='i4'),
+    }, columns=['index', 'integers'])
+
+    _generate_partition_directories(fs, base_path, partition_spec, df)
+
+    dataset = pq.ParquetDataset(
+        base_path, filesystem=fs,
+        filters=[
+            ('integers', '<=', 3),
+            ('integers', '>=', 2),
+        ]
+    )
+    table = dataset.read()
+    result_df = (table.to_pandas()
+                      .sort_values(by='index')
+                      .reset_index(drop=True))
+
+    result_list = [int(x) for x in map(int, result_df['integers'].values)]
+    assert result_list == [2, 3]
+
+
+@parquet
+def test_invalid_pred_op(tmpdir):
+    fs = LocalFileSystem.get_instance()
+    base_path = str(tmpdir)
+
+    import pyarrow.parquet as pq
+
+    integer_keys = [0, 1, 2, 3, 4]
+    partition_spec = [
+        ['integers', integer_keys],
+    ]
+    N = 5
+
+    df = pd.DataFrame({
+        'index': np.arange(N),
+        'integers': np.array(integer_keys, dtype='i4'),
+    }, columns=['index', 'integers'])
+
+    _generate_partition_directories(fs, base_path, partition_spec, df)
+
+    with pytest.raises(ValueError):
+        pq.ParquetDataset(base_path,
+                          filesystem=fs,
+                          filters=[
+                            ('integers', '=<', 3),
+                          ])
 
 
 @pytest.yield_fixture

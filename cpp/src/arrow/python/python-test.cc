@@ -28,7 +28,9 @@
 
 #include "arrow/python/arrow_to_pandas.h"
 #include "arrow/python/builtin_convert.h"
+#include "arrow/python/decimal.h"
 #include "arrow/python/helpers.h"
+#include "arrow/util/checked_cast.h"
 
 namespace arrow {
 namespace py {
@@ -74,6 +76,52 @@ TEST(OwnedRefNoGIL, TestMoves) {
   vec.emplace_back(v);
   ASSERT_EQ(Py_REFCNT(u), 1);
   ASSERT_EQ(Py_REFCNT(v), 1);
+}
+
+TEST(CheckPyError, TestStatus) {
+  PyAcquireGIL lock;
+  Status st;
+
+  auto check_error = [](Status& st, const char* expected_message = "some error") {
+    st = CheckPyError();
+    ASSERT_EQ(st.message(), expected_message);
+    ASSERT_FALSE(PyErr_Occurred());
+  };
+
+  for (PyObject* exc_type : {PyExc_Exception, PyExc_SyntaxError}) {
+    PyErr_SetString(exc_type, "some error");
+    check_error(st);
+    ASSERT_TRUE(st.IsUnknownError());
+  }
+
+  PyErr_SetString(PyExc_TypeError, "some error");
+  check_error(st);
+  ASSERT_TRUE(st.IsTypeError());
+
+  PyErr_SetString(PyExc_ValueError, "some error");
+  check_error(st);
+  ASSERT_TRUE(st.IsInvalid());
+
+  PyErr_SetString(PyExc_KeyError, "some error");
+  check_error(st, "'some error'");
+  ASSERT_TRUE(st.IsKeyError());
+
+  for (PyObject* exc_type : {PyExc_OSError, PyExc_IOError}) {
+    PyErr_SetString(exc_type, "some error");
+    check_error(st);
+    ASSERT_TRUE(st.IsIOError());
+  }
+
+  PyErr_SetString(PyExc_NotImplementedError, "some error");
+  check_error(st);
+  ASSERT_TRUE(st.IsNotImplemented());
+
+  // No override if a specific status code is given
+  PyErr_SetString(PyExc_TypeError, "some error");
+  st = CheckPyError(StatusCode::SerializationError);
+  ASSERT_TRUE(st.IsSerializationError());
+  ASSERT_EQ(st.message(), "some error");
+  ASSERT_FALSE(PyErr_Occurred());
 }
 
 class DecimalTest : public ::testing::Test {
@@ -190,8 +238,9 @@ TEST(PandasConversionTest, TestObjectBlockWriteFails) {
   PyObject* out;
   Py_BEGIN_ALLOW_THREADS;
   PandasOptions options;
+  options.use_threads = true;
   MemoryPool* pool = default_memory_pool();
-  ASSERT_RAISES(UnknownError, ConvertTableToPandas(options, table, 2, pool, &out));
+  ASSERT_RAISES(UnknownError, ConvertTableToPandas(options, table, pool, &out));
   Py_END_ALLOW_THREADS;
 }
 
@@ -220,7 +269,7 @@ TEST(BuiltinConversionTest, TestMixedTypeFails) {
   ASSERT_EQ(PyList_SetItem(list, 1, integer), 0);
   ASSERT_EQ(PyList_SetItem(list, 2, doub), 0);
 
-  ASSERT_RAISES(UnknownError, ConvertPySequence(list, pool, &arr));
+  ASSERT_RAISES(TypeError, ConvertPySequence(list, pool, &arr));
 }
 
 TEST_F(DecimalTest, FromPythonDecimalRescaleNotTruncateable) {
@@ -229,7 +278,7 @@ TEST_F(DecimalTest, FromPythonDecimalRescaleNotTruncateable) {
   Decimal128 value;
   OwnedRef python_decimal(this->CreatePythonDecimal("1.001"));
   auto type = ::arrow::decimal(10, 2);
-  const auto& decimal_type = static_cast<const DecimalType&>(*type);
+  const auto& decimal_type = checked_cast<const DecimalType&>(*type);
   ASSERT_RAISES(Invalid, internal::DecimalFromPythonDecimal(python_decimal.obj(),
                                                             decimal_type, &value));
 }
@@ -240,10 +289,20 @@ TEST_F(DecimalTest, FromPythonDecimalRescaleTruncateable) {
   Decimal128 value;
   OwnedRef python_decimal(this->CreatePythonDecimal("1.000"));
   auto type = ::arrow::decimal(10, 2);
-  const auto& decimal_type = static_cast<const DecimalType&>(*type);
+  const auto& decimal_type = checked_cast<const DecimalType&>(*type);
   ASSERT_OK(
       internal::DecimalFromPythonDecimal(python_decimal.obj(), decimal_type, &value));
   ASSERT_EQ(100, value.low_bits());
+}
+
+TEST_F(DecimalTest, FromPythonNegativeDecimalRescale) {
+  Decimal128 value;
+  OwnedRef python_decimal(this->CreatePythonDecimal("-1.000"));
+  auto type = ::arrow::decimal(10, 9);
+  const auto& decimal_type = checked_cast<const DecimalType&>(*type);
+  ASSERT_OK(
+      internal::DecimalFromPythonDecimal(python_decimal.obj(), decimal_type, &value));
+  ASSERT_EQ(-1000000000, value);
 }
 
 TEST_F(DecimalTest, TestOverflowFails) {
@@ -256,7 +315,7 @@ TEST_F(DecimalTest, TestOverflowFails) {
   ASSERT_EQ(1, metadata.scale());
 
   auto type = ::arrow::decimal(38, 38);
-  const auto& decimal_type = static_cast<const DecimalType&>(*type);
+  const auto& decimal_type = checked_cast<const DecimalType&>(*type);
   ASSERT_RAISES(Invalid, internal::DecimalFromPythonDecimal(python_decimal.obj(),
                                                             decimal_type, &value));
 }
@@ -316,7 +375,7 @@ TEST_F(DecimalTest, TestMixedPrecisionAndScale) {
   MemoryPool* pool = default_memory_pool();
   std::shared_ptr<Array> arr;
   ASSERT_OK(ConvertPySequence(list, pool, &arr));
-  const auto& type = static_cast<const DecimalType&>(*arr->type());
+  const auto& type = checked_cast<const DecimalType&>(*arr->type());
 
   int32_t expected_precision = 9;
   int32_t expected_scale = 3;
@@ -345,7 +404,7 @@ TEST_F(DecimalTest, TestMixedPrecisionAndScaleSequenceConvert) {
 
   ASSERT_OK(ConvertPySequence(list, pool, &arr));
 
-  const auto& type = static_cast<const Decimal128Type&>(*arr->type());
+  const auto& type = checked_cast<const Decimal128Type&>(*arr->type());
   ASSERT_EQ(3, type.precision());
   ASSERT_EQ(3, type.scale());
 }

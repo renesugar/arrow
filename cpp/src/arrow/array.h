@@ -30,6 +30,7 @@
 #include "arrow/type_fwd.h"
 #include "arrow/type_traits.h"
 #include "arrow/util/bit-util.h"
+#include "arrow/util/checked_cast.h"
 #include "arrow/util/macros.h"
 #include "arrow/util/visibility.h"
 #include "arrow/visitor.h"
@@ -99,6 +100,15 @@ struct ARROW_EXPORT ArrayData {
   }
 
   ArrayData(const std::shared_ptr<DataType>& type, int64_t length,
+            const std::vector<std::shared_ptr<Buffer>>& buffers,
+            const std::vector<std::shared_ptr<ArrayData>>& child_data,
+            int64_t null_count = kUnknownNullCount, int64_t offset = 0)
+      : ArrayData(type, length, null_count, offset) {
+    this->buffers = buffers;
+    this->child_data = child_data;
+  }
+
+  ArrayData(const std::shared_ptr<DataType>& type, int64_t length,
             std::vector<std::shared_ptr<Buffer>>&& buffers,
             int64_t null_count = kUnknownNullCount, int64_t offset = 0)
       : ArrayData(type, length, null_count, offset) {
@@ -114,6 +124,12 @@ struct ARROW_EXPORT ArrayData {
   static std::shared_ptr<ArrayData> Make(
       const std::shared_ptr<DataType>& type, int64_t length,
       const std::vector<std::shared_ptr<Buffer>>& buffers,
+      int64_t null_count = kUnknownNullCount, int64_t offset = 0);
+
+  static std::shared_ptr<ArrayData> Make(
+      const std::shared_ptr<DataType>& type, int64_t length,
+      const std::vector<std::shared_ptr<Buffer>>& buffers,
+      const std::vector<std::shared_ptr<ArrayData>>& child_data,
       int64_t null_count = kUnknownNullCount, int64_t offset = 0);
 
   static std::shared_ptr<ArrayData> Make(const std::shared_ptr<DataType>& type,
@@ -194,7 +210,7 @@ class ARROW_EXPORT Array {
   /// \brief Return true if value at index is valid (not null). Does not
   /// boundscheck
   bool IsValid(int64_t i) const {
-    return null_bitmap_data_ != NULLPTR &&
+    return null_bitmap_data_ == NULLPTR ||
            BitUtil::GetBit(null_bitmap_data_, i + data_->offset);
   }
 
@@ -568,7 +584,7 @@ class ARROW_EXPORT FixedSizeBinaryArray : public PrimitiveArray {
  protected:
   inline void SetData(const std::shared_ptr<ArrayData>& data) {
     this->PrimitiveArray::SetData(data);
-    byte_width_ = static_cast<const FixedSizeBinaryType&>(*type()).byte_width();
+    byte_width_ = checked_cast<const FixedSizeBinaryType&>(*type()).byte_width();
   }
 
   int32_t byte_width_;
@@ -609,6 +625,12 @@ class ARROW_EXPORT StructArray : public Array {
   // with this array.  The returned array has its offset, length and null
   // count adjusted.
   std::shared_ptr<Array> field(int pos) const;
+
+  /// \brief Flatten this array as a vector of arrays, one for each field
+  ///
+  /// \param[in] pool The pool to allocate null bitmaps from, if necessary
+  /// \param[out] out The resulting vector of arrays
+  Status Flatten(MemoryPool* pool, ArrayVector* out) const;
 
  private:
   // For caching boxed child data
@@ -672,8 +694,12 @@ class ARROW_EXPORT UnionArray : public Array {
   const type_id_t* raw_type_ids() const { return raw_type_ids_ + data_->offset; }
   const int32_t* raw_value_offsets() const { return raw_value_offsets_ + data_->offset; }
 
-  UnionMode::type mode() const { return static_cast<const UnionType&>(*type()).mode(); }
+  UnionMode::type mode() const { return checked_cast<const UnionType&>(*type()).mode(); }
 
+  // Return the given field as an individual array.
+  // For sparse unions, the returned array has its offset, length and null
+  // count adjusted.
+  // For dense unions, the returned array is unchanged.
   std::shared_ptr<Array> child(int pos) const;
 
   /// Only use this while the UnionArray is in scope

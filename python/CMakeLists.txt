@@ -79,6 +79,9 @@ if("${CMAKE_SOURCE_DIR}" STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}")
   option(PYARROW_BUNDLE_BOOST
     "Bundle the Boost libraries when we bundle Arrow C++"
     OFF)
+  option(PYARROW_GENERATE_COVERAGE
+    "Build with Cython code coverage enabled"
+    OFF)
   set(PYARROW_CXXFLAGS "" CACHE STRING
     "Compiler flags to append when compiling Arrow")
 endif()
@@ -106,7 +109,7 @@ if (NOT MSVC)
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-omit-frame-pointer")
 
   # Suppress Cython warnings
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-variable")
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-variable -Wno-maybe-uninitialized")
 else()
   # MSVC version of -Wno-return-type-c-linkage
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /wd4190")
@@ -141,13 +144,18 @@ endif()
 # For any C code, use the same flags.
 set(CMAKE_C_FLAGS "${CMAKE_CXX_FLAGS}")
 
-# set compile output directory
-string (TOLOWER ${CMAKE_BUILD_TYPE} BUILD_SUBDIR_NAME)
+if (MSVC)
+  # MSVC makes its own output directories based on the build configuration
+  set(BUILD_SUBDIR_NAME "")
+else()
+  # Set compile output directory
+  string (TOLOWER ${CMAKE_BUILD_TYPE} BUILD_SUBDIR_NAME)
+endif()
 
 # If build in-source, create the latest symlink. If build out-of-source, which is
 # preferred, simply output the binaries in the build folder
 if (${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_CURRENT_BINARY_DIR})
-  set(BUILD_OUTPUT_ROOT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/build/${BUILD_SUBDIR_NAME}/")
+  set(BUILD_OUTPUT_ROOT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/build/${BUILD_SUBDIR_NAME}")
   # Link build/latest to the current build directory, to avoid developers
   # accidentally running the latest debug build when in fact they're building
   # release builds.
@@ -155,15 +163,10 @@ if (${CMAKE_SOURCE_DIR} STREQUAL ${CMAKE_CURRENT_BINARY_DIR})
   if (NOT APPLE)
     set(MORE_ARGS "-T")
   endif()
-EXECUTE_PROCESS(COMMAND ln ${MORE_ARGS} -sf ${BUILD_OUTPUT_ROOT_DIRECTORY}
-  ${CMAKE_CURRENT_BINARY_DIR}/build/latest)
+  EXECUTE_PROCESS(COMMAND ln ${MORE_ARGS} -sf ${BUILD_OUTPUT_ROOT_DIRECTORY}
+    ${CMAKE_CURRENT_BINARY_DIR}/build/latest)
 else()
-  if (MSVC)
-    # MSVC makes its own output directories based on the build configuration
-    set(BUILD_OUTPUT_ROOT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/")
-  else()
-    set(BUILD_OUTPUT_ROOT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/${BUILD_SUBDIR_NAME}/")
-  endif()
+  set(BUILD_OUTPUT_ROOT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/${BUILD_SUBDIR_NAME}")
 endif()
 
 message(STATUS "Build output directory: ${BUILD_OUTPUT_ROOT_DIRECTORY}")
@@ -404,7 +407,7 @@ if (PYARROW_BUILD_PLASMA)
     ${LINK_LIBS}
     libplasma_shared)
 
-  set(CYTHON_EXTENSIONS ${CYTHON_EXTENSIONS} plasma)
+  set(CYTHON_EXTENSIONS ${CYTHON_EXTENSIONS} _plasma)
   file(COPY ${PLASMA_EXECUTABLE} DESTINATION ${BUILD_OUTPUT_ROOT_DIRECTORY})
 endif()
 
@@ -419,6 +422,10 @@ endif()
 ############################################################
 # Setup and build Cython modules
 ############################################################
+
+if (PYARROW_GENERATE_COVERAGE)
+  set(CYTHON_FLAGS "${CYTHON_FLAGS}" "-Xlinetrace=True")
+endif()
 
 foreach(module ${CYTHON_EXTENSIONS})
     string(REPLACE "." ";" directories ${module})
@@ -460,5 +467,12 @@ foreach(module ${CYTHON_EXTENSIONS})
         INSTALL_RPATH ${module_install_rpath})
     endif()
 
+    if (PYARROW_GENERATE_COVERAGE)
+      set_target_properties(${module_name} PROPERTIES
+        COMPILE_DEFINITIONS "CYTHON_TRACE=1;CYTHON_TRACE_NOGIL=1")
+    endif()
+
     target_link_libraries(${module_name} ${LINK_LIBS})
+
+    # Generated files will be moved to the right directory by setup.py.
 endforeach(module)

@@ -20,6 +20,8 @@ from pyarrow.includes.libarrow cimport *
 from pyarrow.includes.libarrow cimport CStatus
 from cpython cimport PyObject
 from libcpp cimport nullptr
+from libcpp.cast cimport dynamic_cast
+
 
 cdef extern from "Python.h":
     int PySlice_Check(object)
@@ -42,6 +44,7 @@ cdef class DataType:
     cdef:
         shared_ptr[CDataType] sp_type
         CDataType* type
+        bytes pep3118_format
 
     cdef void init(self, const shared_ptr[CDataType]& type)
 
@@ -140,12 +143,18 @@ cdef class ListValue(ArrayValue):
     cdef int64_t length(self)
 
 
+cdef class StructValue(ArrayValue):
+    cdef:
+        CStructArray* ap
+
+
 cdef class UnionValue(ArrayValue):
     cdef:
         CUnionArray* ap
         list value_types
 
     cdef getitem(self, int64_t i)
+
 
 cdef class StringValue(ArrayValue):
     pass
@@ -248,6 +257,10 @@ cdef class FixedSizeBinaryArray(Array):
 
 
 cdef class Decimal128Array(FixedSizeBinaryArray):
+    pass
+
+
+cdef class StructArray(Array):
     pass
 
 

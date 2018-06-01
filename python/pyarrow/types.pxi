@@ -43,6 +43,47 @@ cdef dict _pandas_type_map = {
     _Type_DECIMAL: np.object_,
 }
 
+cdef dict _pep3118_type_map = {
+    _Type_INT8: b'b',
+    _Type_INT16: b'h',
+    _Type_INT32: b'i',
+    _Type_INT64: b'q',
+    _Type_UINT8: b'B',
+    _Type_UINT16: b'H',
+    _Type_UINT32: b'I',
+    _Type_UINT64: b'Q',
+    _Type_HALF_FLOAT: b'e',
+    _Type_FLOAT: b'f',
+    _Type_DOUBLE: b'd',
+}
+
+
+cdef bytes _datatype_to_pep3118(CDataType* type):
+    """
+    Construct a PEP 3118 format string describing the given datatype.
+    None is returned for unsupported types.
+    """
+    try:
+        char = _pep3118_type_map[type.id()]
+    except KeyError:
+        return None
+    else:
+        if char in b'bBhHiIqQ':
+            # Use "standard" int widths, not native
+            return b'=' + char
+        else:
+            return char
+
+
+def _is_primitive(Type type):
+    # This is simply a redirect, the official API is in pyarrow.types.
+    return is_primitive(type)
+
+
+# Workaround for Cython parsing bug
+# https://github.com/cython/cython/issues/2143
+ctypedef CFixedWidthType* _CFixedWidthTypePtr
+
 
 cdef class DataType:
     """
@@ -54,11 +95,21 @@ cdef class DataType:
     cdef void init(self, const shared_ptr[CDataType]& type):
         self.sp_type = type
         self.type = type.get()
+        self.pep3118_format = _datatype_to_pep3118(self.type)
 
     property id:
 
         def __get__(self):
             return self.type.id()
+
+    property bit_width:
+
+        def __get__(self):
+            cdef _CFixedWidthTypePtr ty
+            ty = dynamic_cast[_CFixedWidthTypePtr](self.type)
+            if ty == nullptr:
+                raise ValueError("Non-fixed width type")
+            return ty.bit_width()
 
     def __str__(self):
         if self.type is NULL:
@@ -87,13 +138,11 @@ cdef class DataType:
     def __repr__(self):
         return '{0.__class__.__name__}({0})'.format(self)
 
-    def __richcmp__(DataType self, object other, int op):
-        if op == cp.Py_EQ:
+    def __eq__(self, other):
+        try:
             return self.equals(other)
-        elif op == cp.Py_NE:
-            return not self.equals(other)
-        else:
-            raise TypeError('Invalid comparison')
+        except (TypeError, ValueError):
+            return False
 
     def equals(self, other):
         """
@@ -139,6 +188,16 @@ cdef class DictionaryType(DataType):
 
         def __get__(self):
             return self.dict_type.ordered()
+
+    property index_type:
+
+        def __get__(self):
+            return pyarrow_wrap_data_type(self.dict_type.index_type())
+
+    property dictionary:
+
+        def __get__(self):
+            return pyarrow_wrap_array(self.dict_type.dictionary())
 
 
 cdef class ListType(DataType):
@@ -344,16 +403,24 @@ cdef class Field:
     def equals(self, Field other):
         """
         Test if this field is equal to the other
+
+        Parameters
+        ----------
+        other : pyarrow.Field
+        check_metadata : boolean, default True
+            Key/value metadata must be equal too
+
+        Returns
+        -------
+        is_equal : boolean
         """
         return self.field.Equals(deref(other.field))
 
-    def __richcmp__(Field self, Field other, int op):
-        if op == cp.Py_EQ:
+    def __eq__(self, other):
+        try:
             return self.equals(other)
-        elif op == cp.Py_NE:
-            return not self.equals(other)
-        else:
-            raise TypeError('Invalid comparison')
+        except TypeError:
+            return False
 
     def __reduce__(self):
         return Field, (), self.__getstate__()
@@ -371,6 +438,9 @@ cdef class Field:
 
     def __repr__(self):
         return self.__str__()
+
+    def __hash__(self):
+        return hash((self.field.name(), self.type.id))
 
     property nullable:
 
@@ -432,6 +502,20 @@ cdef class Field:
             new_field = self.field.RemoveMetadata()
         return pyarrow_wrap_field(new_field)
 
+    def flatten(self):
+        """
+        Flatten this field.  If a struct field, individual child fields
+        will be returned with their names prefixed by the parent's name.
+
+        Returns
+        -------
+        fields : List[pyarrow.Field]
+        """
+        cdef vector[shared_ptr[CField]] flattened
+        with nogil:
+            flattened = self.field.Flatten()
+        return [pyarrow_wrap_field(f) for f in flattened]
+
 
 cdef class Schema:
 
@@ -490,22 +574,30 @@ cdef class Schema:
                 self.schema.metadata())
             return box_metadata(metadata.get())
 
-    def __richcmp__(self, other, int op):
-        if op == cp.Py_EQ:
+    def __eq__(self, other):
+        try:
             return self.equals(other)
-        elif op == cp.Py_NE:
-            return not self.equals(other)
-        else:
-            raise TypeError('Invalid comparison')
+        except TypeError:
+            return False
 
-    def equals(self, other):
+    def equals(self, other, bint check_metadata=True):
         """
         Test if this schema is equal to the other
-        """
-        cdef Schema _other
-        _other = other
 
-        return self.sp_schema.get().Equals(deref(_other.schema))
+        Parameters
+        ----------
+        other :  pyarrow.Schema
+        check_metadata : bool, default False
+            Key/value metadata must be equal too
+
+        Returns
+        -------
+        is_equal : boolean
+        """
+        cdef Schema _other = other
+
+        return self.sp_schema.get().Equals(deref(_other.schema),
+                                           check_metadata)
 
     def field_by_name(self, name):
         """

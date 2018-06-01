@@ -17,44 +17,66 @@
 
 use std::str;
 
-use bytes::{BufMut, BytesMut};
-
 use super::buffer::Buffer;
+use super::datatypes::*;
+use super::list_builder::ListBuilder;
 
-pub struct List<T> {
-    pub data: Buffer<T>,
-    pub offsets: Buffer<i32>,
+/// List<T> is a nested type in which each array slot contains a variable-size sequence of values of
+/// the same type T
+pub struct List<T>
+where
+    T: ArrowPrimitiveType,
+{
+    /// Contiguous region of memory holding contents of the lists
+    data: Buffer<T>,
+    /// offsets to start of each array slot
+    offsets: Buffer<i32>,
 }
 
-impl<T> List<T> {
-    pub fn len(&self) -> i32 {
+impl<T> List<T>
+where
+    T: ArrowPrimitiveType,
+{
+    /// Create a List from raw parts
+    pub fn from_raw_parts(data: Buffer<T>, offsets: Buffer<i32>) -> Self {
+        List { data, offsets }
+    }
+
+    /// Get the length of the List (number of array slots)
+    pub fn len(&self) -> usize {
         self.offsets.len() - 1
     }
 
-    pub fn slice(&self, index: usize) -> &[T] {
+    /// Get a reference to the raw data in the list
+    pub fn data(&self) -> &Buffer<T> {
+        &self.data
+    }
+
+    /// Get a reference to the offsets in the list
+    pub fn offsets(&self) -> &Buffer<i32> {
+        &self.offsets
+    }
+
+    /// Get the contents of a single array slot
+    pub fn get(&self, index: usize) -> &[T] {
         let start = *self.offsets.get(index) as usize;
         let end = *self.offsets.get(index + 1) as usize;
-        &self.data.slice(start, end)
+        self.data.slice(start, end)
     }
 }
 
+/// Create a List<u8> from a Vec<String>
 impl From<Vec<String>> for List<u8> {
     fn from(v: Vec<String>) -> Self {
-        let mut offsets: Vec<i32> = Vec::with_capacity(v.len() + 1);
-        let mut buf = BytesMut::with_capacity(v.len() * 32);
-        offsets.push(0_i32);
+        let mut b: ListBuilder<u8> = ListBuilder::with_capacity(v.len());
         v.iter().for_each(|s| {
-            buf.put(s.as_bytes());
-            offsets.push(buf.len() as i32);
+            b.push(s.as_bytes());
         });
-        List {
-            data: Buffer::from(buf.freeze()),
-            offsets: Buffer::from(offsets),
-        }
+        b.finish()
     }
 }
 
-/// This method mostly just used for unit tests
+/// Create a List<u8> from a Vec<&str>
 impl From<Vec<&'static str>> for List<u8> {
     fn from(v: Vec<&'static str>) -> Self {
         List::from(v.iter().map(|s| s.to_string()).collect::<Vec<String>>())
@@ -69,10 +91,20 @@ mod tests {
     fn test_utf8_slices() {
         let list = List::from(vec!["this", "is", "a", "test"]);
         assert_eq!(4, list.len());
-        assert_eq!("this", str::from_utf8(list.slice(0)).unwrap());
-        assert_eq!("is", str::from_utf8(list.slice(1)).unwrap());
-        assert_eq!("a", str::from_utf8(list.slice(2)).unwrap());
-        assert_eq!("test", str::from_utf8(list.slice(3)).unwrap());
+        assert_eq!("this", str::from_utf8(list.get(0)).unwrap());
+        assert_eq!("is", str::from_utf8(list.get(1)).unwrap());
+        assert_eq!("a", str::from_utf8(list.get(2)).unwrap());
+        assert_eq!("test", str::from_utf8(list.get(3)).unwrap());
+    }
+
+    #[test]
+    fn test_utf8_empty_strings() {
+        let list = List::from(vec!["", "", "", ""]);
+        assert_eq!(4, list.len());
+        assert_eq!("", str::from_utf8(list.get(0)).unwrap());
+        assert_eq!("", str::from_utf8(list.get(1)).unwrap());
+        assert_eq!("", str::from_utf8(list.get(2)).unwrap());
+        assert_eq!("", str::from_utf8(list.get(3)).unwrap());
     }
 
 }

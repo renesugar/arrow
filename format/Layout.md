@@ -21,7 +21,7 @@
 
 ## Definitions / Terminology
 
-Since different projects have used differents words to describe various
+Since different projects have used different words to describe various
 concepts, here is a small glossary to help disambiguate.
 
 * Array: a sequence of values with known length all having the same type.
@@ -273,7 +273,7 @@ A list-array is represented by the combination of the following:
 
 The offsets array encodes a start position in the values array, and the length
 of the value in each slot is computed using the first difference with the next
-element in the offsets array. For example. the position and length of slot j is
+element in the offsets array. For example, the position and length of slot j is
 computed as:
 
 ```
@@ -312,7 +312,7 @@ will have the following representation:
   * Length: 7,  Null count: 0
   * Null bitmap buffer: Not required
 
-    | Bytes 0-7  | Bytes 8-63  |
+    | Bytes 0-6  | Bytes 7-63  |
     |------------|-------------|
     | joemark    | unspecified |
 ```
@@ -342,7 +342,7 @@ will be be represented as follows:
 
   * Offsets buffer (int32)
 
-    | Bytes 0-28           | Bytes 29-63 |
+    | Bytes 0-27           | Bytes 28-63 |
     |----------------------|-------------|
     | 0, 2, 4, 7, 7, 8, 10 | unspecified |
 
@@ -366,7 +366,7 @@ type metadata, not the physical memory layout.
 A struct array does not have any additional allocated physical storage for its values.
 A struct array must still have an allocated null bitmap, if it has one or more null values.
 
-Physically, a struct type has one child array for each field.
+Physically, a struct type has one child array for each field. The child arrays are independent and need not be adjacent to each other in memory.
 
 For example, the struct (field names shown here as strings for illustration
 purposes)
@@ -610,7 +610,7 @@ reinterpreted as a non-nested array.
 Similar to structs, a particular child array may have a non-null slot
 even if the null bitmap of the parent union array indicates the slot is
 null.  Additionally, a child array may have a non-null slot even if
-the the types array indicates that a slot contains a different type at the index.
+the types array indicates that a slot contains a different type at the index.
 
 ## Dictionary encoding
 

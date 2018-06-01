@@ -54,6 +54,7 @@ libarrow_glib_la_headers =			\
 	composite-array.h			\
 	composite-data-type.h			\
 	data-type.h				\
+	decimal.h				\
 	error.h					\
 	field.h					\
 	gobject-type.h				\
@@ -82,7 +83,8 @@ libarrow_glib_la_headers +=			\
 	compute.h
 
 libarrow_glib_la_generated_headers =		\
-	enums.h
+	enums.h					\
+	version.h
 
 libarrow_glib_la_generated_sources =		\
 	enums.c					\
@@ -97,6 +99,7 @@ libarrow_glib_la_sources =			\
 	column.cpp				\
 	composite-array.cpp			\
 	composite-data-type.cpp			\
+	decimal.cpp				\
 	error.cpp				\
 	field.cpp				\
 	record-batch.cpp			\
@@ -135,6 +138,7 @@ libarrow_glib_la_cpp_headers =			\
 	chunked-array.hpp			\
 	column.hpp				\
 	data-type.hpp				\
+	decimal.hpp				\
 	error.hpp				\
 	field.hpp				\
 	record-batch.hpp			\
@@ -166,6 +170,7 @@ libarrow_glib_la_SOURCES =			\
 	$(libarrow_glib_la_cpp_headers)
 
 BUILT_SOURCES =					\
+	$(libarrow_glib_la_genearted_headers)	\
 	$(libarrow_glib_la_genearted_sources)	\
 	stamp-enums.c				\
 	stamp-enums.h

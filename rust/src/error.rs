@@ -15,17 +15,10 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::convert::*;
-
-#[derive(Debug, Clone)]
-pub struct Error {
-    msg: String,
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArrowError {
+    MemoryError(String),
+    ParseError(String),
 }
 
-impl From<&'static str> for Error where {
-    fn from(msg: &'static str) -> Self {
-        Error {
-            msg: String::from(msg),
-        }
-    }
-}
+pub type Result<T> = ::std::result::Result<T, ArrowError>;

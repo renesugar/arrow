@@ -23,6 +23,7 @@ import sys
 import numpy as np
 import pandas as pd
 import pandas.util.testing as tm
+import pickle
 
 import pyarrow as pa
 from pyarrow.pandas_compat import get_logical_type
@@ -41,6 +42,12 @@ def test_repr_on_pre_init_array():
 def test_getitem_NA():
     arr = pa.array([1, None, 2])
     assert arr[1] is pa.NA
+
+
+def test_constructor_raises():
+    # This could happen by wrong capitalization.
+    with pytest.raises(RuntimeError):
+        pa.Array([1, 2])
 
 
 def test_list_format():
@@ -211,6 +218,9 @@ def test_array_from_buffers():
     with pytest.raises(TypeError):
         pa.Array.from_buffers(pa.int16(), 3, [u'', u''], offset=1)
 
+    with pytest.raises(NotImplementedError):
+        pa.Array.from_buffers(pa.list_(pa.int16()), 4, [None, values_buf])
+
 
 def test_dictionary_from_numpy():
     indices = np.repeat([0, 1, 2], 2)
@@ -331,6 +341,25 @@ def test_union_from_sparse():
     result = pa.UnionArray.from_sparse(types, [binary, int64])
 
     assert result.to_pylist() == [b'a', 1, b'b', b'c', 2, 3, b'd']
+
+
+def test_union_array_slice():
+    # ARROW-2314
+    arr = pa.UnionArray.from_sparse(pa.array([0, 0, 1, 1], type=pa.int8()),
+                                    [pa.array(["a", "b", "c", "d"]),
+                                     pa.array([1, 2, 3, 4])])
+    assert arr[1:].to_pylist() == ["b", 3, 4]
+
+    binary = pa.array([b'a', b'b', b'c', b'd'], type='binary')
+    int64 = pa.array([1, 2, 3], type='int64')
+    types = pa.array([0, 1, 0, 0, 1, 1, 0], type='int8')
+    value_offsets = pa.array([0, 0, 2, 1, 1, 2, 3], type='int32')
+
+    arr = pa.UnionArray.from_dense(types, value_offsets, [binary, int64])
+    lst = arr.to_pylist()
+    for i in range(len(arr)):
+        for j in range(i, len(arr)):
+            assert arr[i:j].to_pylist() == lst[i:j]
 
 
 def test_string_from_buffers():
@@ -559,6 +588,28 @@ def test_simple_type_construction():
 
 
 @pytest.mark.parametrize(
+    ('data', 'typ'),
+    [
+        ([True, False, True, True], pa.bool_()),
+        ([1, 2, 4, 6], pa.int64()),
+        ([1.0, 2.5, None], pa.float64()),
+        (['a', None, 'b'], pa.string()),
+        ([], None),
+        ([[1, 2], [3]], pa.list_(pa.int64())),
+        ([['a'], None, ['b', 'c']], pa.list_(pa.string())),
+        ([(1, 'a'), (2, 'c'), None],
+            pa.struct([pa.field('a', pa.int64()), pa.field('b', pa.string())]))
+    ]
+)
+def test_array_pickle(data, typ):
+    # Allocate here so that we don't have any Arrow data allocated.
+    # This is needed to ensure that allocator tests can be reliable.
+    array = pa.array(data, type=typ)
+    result = pickle.loads(pickle.dumps(array))
+    assert array.equals(result)
+
+
+@pytest.mark.parametrize(
     ('type', 'expected'),
     [
         (pa.null(), 'empty'),
@@ -778,3 +829,51 @@ def test_invalid_tensor_operation():
     t = pa.Tensor()
     with pytest.raises(TypeError):
         t.to_numpy()
+
+
+def test_struct_array_flatten():
+    ty = pa.struct([pa.field('x', pa.int16()),
+                    pa.field('y', pa.float32())])
+    a = pa.array([(1, 2.5), (3, 4.5), (5, 6.5)], type=ty)
+    xs, ys = a.flatten()
+    assert xs.type == pa.int16()
+    assert ys.type == pa.float32()
+    assert xs.to_pylist() == [1, 3, 5]
+    assert ys.to_pylist() == [2.5, 4.5, 6.5]
+    xs, ys = a[1:].flatten()
+    assert xs.to_pylist() == [3, 5]
+    assert ys.to_pylist() == [4.5, 6.5]
+
+    a = pa.array([(1, 2.5), None, (3, 4.5)], type=ty)
+    xs, ys = a.flatten()
+    assert xs.to_pylist() == [1, None, 3]
+    assert ys.to_pylist() == [2.5, None, 4.5]
+    xs, ys = a[1:].flatten()
+    assert xs.to_pylist() == [None, 3]
+    assert ys.to_pylist() == [None, 4.5]
+
+    a = pa.array([(1, None), (2, 3.5), (None, 4.5)], type=ty)
+    xs, ys = a.flatten()
+    assert xs.to_pylist() == [1, 2, None]
+    assert ys.to_pylist() == [None, 3.5, 4.5]
+    xs, ys = a[1:].flatten()
+    assert xs.to_pylist() == [2, None]
+    assert ys.to_pylist() == [3.5, 4.5]
+
+    a = pa.array([(1, None), None, (None, 2.5)], type=ty)
+    xs, ys = a.flatten()
+    assert xs.to_pylist() == [1, None, None]
+    assert ys.to_pylist() == [None, None, 2.5]
+    xs, ys = a[1:].flatten()
+    assert xs.to_pylist() == [None, None]
+    assert ys.to_pylist() == [None, 2.5]
+
+
+def test_nested_dictionary_array():
+    dict_arr = pa.DictionaryArray.from_arrays([0, 1, 0], ['a', 'b'])
+    list_arr = pa.ListArray.from_arrays([0, 2, 3], dict_arr)
+    assert list_arr.to_pylist() == [['a', 'b'], ['a']]
+
+    dict_arr = pa.DictionaryArray.from_arrays([0, 1, 0], ['a', 'b'])
+    dict_arr2 = pa.DictionaryArray.from_arrays([0, 1, 2, 1, 0], dict_arr)
+    assert dict_arr2.to_pylist() == ['a', 'b', 'a', 'b', 'a']

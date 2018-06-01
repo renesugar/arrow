@@ -17,6 +17,8 @@
 # specific language governing permissions and limitations
 # under the License.
 
+# hide nodejs experimental-feature warnings
+export NODE_NO_WARNINGS=1
 export MINICONDA=$HOME/miniconda
 export PATH="$MINICONDA/bin:$PATH"
 export CONDA_PKGS_DIRS=$HOME/.conda_packages
@@ -27,13 +29,20 @@ export ARROW_C_GLIB_DIR=$TRAVIS_BUILD_DIR/c_glib
 export ARROW_JAVA_DIR=${TRAVIS_BUILD_DIR}/java
 export ARROW_JS_DIR=${TRAVIS_BUILD_DIR}/js
 export ARROW_INTEGRATION_DIR=$TRAVIS_BUILD_DIR/integration
+export ARROW_RUBY_DIR=$TRAVIS_BUILD_DIR/ruby
 export ARROW_RUST_DIR=${TRAVIS_BUILD_DIR}/rust
+
+if [ $ARROW_TRAVIS_COVERAGE == "1" ]; then
+    export ARROW_CPP_COVERAGE_FILE=${TRAVIS_BUILD_DIR}/coverage.info
+    export ARROW_PYTHON_COVERAGE_FILE=${TRAVIS_BUILD_DIR}/.coverage
+fi
 
 export CPP_BUILD_DIR=$TRAVIS_BUILD_DIR/cpp-build
 
 export ARROW_CPP_INSTALL=$TRAVIS_BUILD_DIR/cpp-install
 export ARROW_CPP_BUILD_DIR=$TRAVIS_BUILD_DIR/cpp-build
-export ARROW_C_GLIB_INSTALL=$TRAVIS_BUILD_DIR/c-glib-install
+export ARROW_C_GLIB_INSTALL_AUTOTOOLS=$TRAVIS_BUILD_DIR/c-glib-install-autotools
+export ARROW_C_GLIB_INSTALL_MESON=$TRAVIS_BUILD_DIR/c-glib-install-meson
 
 export ARROW_PYTHON_PARQUET_HOME=$TRAVIS_BUILD_DIR/parquet-env
 

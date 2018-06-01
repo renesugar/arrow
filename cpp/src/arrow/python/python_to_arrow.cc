@@ -40,6 +40,7 @@
 
 #include "arrow/python/common.h"
 #include "arrow/python/helpers.h"
+#include "arrow/python/iterators.h"
 #include "arrow/python/numpy_convert.h"
 #include "arrow/python/platform.h"
 #include "arrow/python/util/datetime.h"
@@ -60,6 +61,7 @@ class SequenceBuilder {
         nones_(pool),
         bools_(::arrow::boolean(), pool),
         ints_(::arrow::int64(), pool),
+        py2_ints_(::arrow::int64(), pool),
         bytes_(::arrow::binary(), pool),
         strings_(pool),
         half_floats_(::arrow::float16(), pool),
@@ -84,7 +86,9 @@ class SequenceBuilder {
     if (*tag == -1) {
       *tag = num_tags_++;
     }
-    RETURN_NOT_OK(offsets_.Append(static_cast<int32_t>(offset)));
+    int32_t offset32;
+    RETURN_NOT_OK(internal::CastSize(offset, &offset32));
+    RETURN_NOT_OK(offsets_.Append(offset32));
     RETURN_NOT_OK(types_.Append(*tag));
     return nones_.AppendToBitmap(true);
   }
@@ -98,6 +102,11 @@ class SequenceBuilder {
   /// Appending a boolean to the sequence
   Status AppendBool(const bool data) {
     return AppendPrimitive(data, &bool_tag_, &bools_);
+  }
+
+  /// Appending a python 2 int64_t to the sequence
+  Status AppendPy2Int64(const int64_t data) {
+    return AppendPrimitive(data, &py2_int_tag_, &py2_ints_);
   }
 
   /// Appending an int64_t to the sequence
@@ -173,26 +182,34 @@ class SequenceBuilder {
   /// \param size
   /// The size of the sublist
   Status AppendList(Py_ssize_t size) {
+    int32_t offset;
+    RETURN_NOT_OK(internal::CastSize(list_offsets_.back() + size, &offset));
     RETURN_NOT_OK(Update(list_offsets_.size() - 1, &list_tag_));
-    list_offsets_.push_back(list_offsets_.back() + static_cast<int32_t>(size));
+    list_offsets_.push_back(offset);
     return Status::OK();
   }
 
   Status AppendTuple(Py_ssize_t size) {
+    int32_t offset;
+    RETURN_NOT_OK(internal::CastSize(tuple_offsets_.back() + size, &offset));
     RETURN_NOT_OK(Update(tuple_offsets_.size() - 1, &tuple_tag_));
-    tuple_offsets_.push_back(tuple_offsets_.back() + static_cast<int32_t>(size));
+    tuple_offsets_.push_back(offset);
     return Status::OK();
   }
 
   Status AppendDict(Py_ssize_t size) {
+    int32_t offset;
+    RETURN_NOT_OK(internal::CastSize(dict_offsets_.back() + size, &offset));
     RETURN_NOT_OK(Update(dict_offsets_.size() - 1, &dict_tag_));
-    dict_offsets_.push_back(dict_offsets_.back() + static_cast<int32_t>(size));
+    dict_offsets_.push_back(offset);
     return Status::OK();
   }
 
   Status AppendSet(Py_ssize_t size) {
+    int32_t offset;
+    RETURN_NOT_OK(internal::CastSize(set_offsets_.back() + size, &offset));
     RETURN_NOT_OK(Update(set_offsets_.size() - 1, &set_tag_));
-    set_offsets_.push_back(set_offsets_.back() + static_cast<int32_t>(size));
+    set_offsets_.push_back(offset);
     return Status::OK();
   }
 
@@ -213,7 +230,7 @@ class SequenceBuilder {
       DCHECK(data->length() == offsets.back());
       std::shared_ptr<Array> offset_array;
       Int32Builder builder(::arrow::int32(), pool_);
-      RETURN_NOT_OK(builder.Append(offsets.data(), offsets.size()));
+      RETURN_NOT_OK(builder.AppendValues(offsets.data(), offsets.size()));
       RETURN_NOT_OK(builder.Finish(&offset_array));
       std::shared_ptr<Array> list_array;
       RETURN_NOT_OK(ListArray::FromArrays(*offset_array, *data, pool_, &list_array));
@@ -239,6 +256,7 @@ class SequenceBuilder {
 
     RETURN_NOT_OK(AddElement(bool_tag_, &bools_));
     RETURN_NOT_OK(AddElement(int_tag_, &ints_));
+    RETURN_NOT_OK(AddElement(py2_int_tag_, &py2_ints_, "py2_int"));
     RETURN_NOT_OK(AddElement(string_tag_, &strings_));
     RETURN_NOT_OK(AddElement(bytes_tag_, &bytes_));
     RETURN_NOT_OK(AddElement(half_float_tag_, &half_floats_));
@@ -269,6 +287,7 @@ class SequenceBuilder {
   NullBuilder nones_;
   BooleanBuilder bools_;
   Int64Builder ints_;
+  Int64Builder py2_ints_;
   BinaryBuilder bytes_;
   StringBuilder strings_;
   HalfFloatBuilder half_floats_;
@@ -291,6 +310,7 @@ class SequenceBuilder {
   // happens in the UPDATE macro in sequence.cc.
   int8_t bool_tag_ = -1;
   int8_t int_tag_ = -1;
+  int8_t py2_int_tag_ = -1;
   int8_t string_tag_ = -1;
   int8_t bytes_tag_ = -1;
   int8_t half_float_tag_ = -1;
@@ -365,17 +385,8 @@ Status CallCustomCallback(PyObject* context, PyObject* method_name, PyObject* el
   *result = NULL;
   if (context == Py_None) {
     std::stringstream ss;
-    OwnedRef repr(PyObject_Repr(elem));
-    RETURN_IF_PYERROR();
-#if PY_MAJOR_VERSION >= 3
-    OwnedRef ascii(PyUnicode_AsASCIIString(repr.obj()));
-    RETURN_IF_PYERROR();
-    ss << "error while calling callback on " << PyBytes_AsString(ascii.obj())
+    ss << "error while calling callback on " << internal::PyObject_StdStringRepr(elem)
        << ": handler not registered";
-#else
-    ss << "error while calling callback on " << PyString_AsString(repr.obj())
-       << ": handler not registered";
-#endif
     return Status::SerializationError(ss.str());
   } else {
     *result = PyObject_CallMethodObjArgs(context, method_name, elem, NULL);
@@ -479,28 +490,19 @@ Status Append(PyObject* context, PyObject* elem, SequenceBuilder* builder,
     }
 #if PY_MAJOR_VERSION < 3
   } else if (PyInt_Check(elem)) {
-    RETURN_NOT_OK(builder->AppendInt64(static_cast<int64_t>(PyInt_AS_LONG(elem))));
+    RETURN_NOT_OK(builder->AppendPy2Int64(static_cast<int64_t>(PyInt_AS_LONG(elem))));
 #endif
   } else if (PyBytes_Check(elem)) {
     auto data = reinterpret_cast<uint8_t*>(PyBytes_AS_STRING(elem));
-    const int64_t size = static_cast<int64_t>(PyBytes_GET_SIZE(elem));
-    if (size > std::numeric_limits<int32_t>::max()) {
-      return Status::Invalid("Cannot writes bytes over 2GB");
-    }
-    RETURN_NOT_OK(builder->AppendBytes(data, static_cast<int32_t>(size)));
+    int32_t size;
+    RETURN_NOT_OK(internal::CastSize(PyBytes_GET_SIZE(elem), &size));
+    RETURN_NOT_OK(builder->AppendBytes(data, size));
   } else if (PyUnicode_Check(elem)) {
-    Py_ssize_t size;
-#if PY_MAJOR_VERSION >= 3
-    char* data = PyUnicode_AsUTF8AndSize(elem, &size);
-#else
-    OwnedRef str(PyUnicode_AsUTF8String(elem));
-    char* data = PyString_AS_STRING(str.obj());
-    size = PyString_GET_SIZE(str.obj());
-#endif
-    if (size > std::numeric_limits<int32_t>::max()) {
-      return Status::Invalid("Cannot writes bytes over 2GB");
-    }
-    RETURN_NOT_OK(builder->AppendString(data, static_cast<int32_t>(size)));
+    PyBytesView view;
+    RETURN_NOT_OK(view.FromString(elem));
+    int32_t size;
+    RETURN_NOT_OK(internal::CastSize(view.size, &size));
+    RETURN_NOT_OK(builder->AppendString(view.bytes, size));
   } else if (PyList_CheckExact(elem)) {
     RETURN_NOT_OK(builder->AppendList(PyList_Size(elem)));
     sublists->push_back(elem);
@@ -585,17 +587,11 @@ Status SerializeSequences(PyObject* context, std::vector<PyObject*> sequences,
   SequenceBuilder builder(nullptr);
   std::vector<PyObject*> sublists, subtuples, subdicts, subsets;
   for (const auto& sequence : sequences) {
-    OwnedRef iterator(PyObject_GetIter(sequence));
-    RETURN_IF_PYERROR();
-    OwnedRef item;
-    while (true) {
-      item.reset(PyIter_Next(iterator.obj()));
-      if (!item.obj()) {
-        break;
-      }
-      RETURN_NOT_OK(Append(context, item.obj(), &builder, &sublists, &subtuples,
-                           &subdicts, &subsets, blobs_out));
-    }
+    auto visit = [&](PyObject* obj) {
+      return Append(context, obj, &builder, &sublists, &subtuples, &subdicts, &subsets,
+                    blobs_out);
+    };
+    RETURN_NOT_OK(internal::VisitIterable(sequence, visit));
   }
   std::shared_ptr<Array> list;
   if (sublists.size() > 0) {

@@ -101,6 +101,7 @@ cdef extern from "parquet/api/schema.h" namespace "parquet" nogil:
         ParquetCompression_GZIP" parquet::Compression::GZIP"
         ParquetCompression_LZO" parquet::Compression::LZO"
         ParquetCompression_BROTLI" parquet::Compression::BROTLI"
+        ParquetCompression_LZ4" parquet::Compression::LZ4"
 
     enum ParquetVersion" parquet::ParquetVersion::type":
         ParquetVersion_V1" parquet::ParquetVersion::PARQUET_1_0"
@@ -197,7 +198,7 @@ cdef extern from "parquet/api/reader.h" namespace "parquet" nogil:
         ParquetCompression compression() const
         const vector[ParquetEncoding]& encodings() const
 
-        bint has_dictionary_page() const
+        int64_t has_dictionary_page() const
         int64_t dictionary_page_offset() const
         int64_t data_page_offset() const
         int64_t index_page_offset() const

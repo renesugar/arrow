@@ -30,6 +30,7 @@
 #include "arrow/compute/context.h"
 #include "arrow/compute/kernel.h"
 #include "arrow/compute/kernels/util-internal.h"
+#include "arrow/util/checked_cast.h"
 #include "arrow/util/hash-util.h"
 #include "arrow/util/hash.h"
 
@@ -152,7 +153,7 @@ class HashTableKernel<Type, Action, enable_if_null<Type>> : public HashTable {
     if (!initialized_) {
       RETURN_NOT_OK(Init());
     }
-    auto action = static_cast<Action*>(this);
+    auto action = checked_cast<Action*>(this);
     RETURN_NOT_OK(action->Reserve(arr.length));
     for (int64_t i = 0; i < arr.length; ++i) {
       action->ObserveNull();
@@ -242,7 +243,7 @@ class HashTableKernel<
     }
 
     const T* values = GetValues<T>(arr, 1);
-    auto action = static_cast<Action*>(this);
+    auto action = checked_cast<Action*>(this);
 
     RETURN_NOT_OK(action->Reserve(arr.length));
 
@@ -326,7 +327,7 @@ class HashTableKernel<Type, Action, enable_if_boolean<Type>> : public HashTable 
   }
 
   Status Append(const ArrayData& arr) override {
-    auto action = static_cast<Action*>(this);
+    auto action = checked_cast<Action*>(this);
 
     RETURN_NOT_OK(action->Reserve(arr.length));
 
@@ -348,23 +349,24 @@ class HashTableKernel<Type, Action, enable_if_boolean<Type>> : public HashTable 
       internal::BitmapReader valid_reader(arr.buffers[0]->data(), arr.offset, arr.length);
       for (int64_t i = 0; i < arr.length; ++i) {
         const bool is_null = valid_reader.IsNotSet();
-        const bool value = value_reader.IsSet();
-        const int j = value ? 1 : 0;
-        hash_slot_t slot = table_[j];
         valid_reader.Next();
-        value_reader.Next();
         if (is_null) {
+          value_reader.Next();
           action->ObserveNull();
           continue;
         }
+        const bool value = value_reader.IsSet();
+        value_reader.Next();
+        const int j = value ? 1 : 0;
+        hash_slot_t slot = table_[j];
         HASH_INNER_LOOP();
       }
     } else {
       for (int64_t i = 0; i < arr.length; ++i) {
         const bool value = value_reader.IsSet();
+        value_reader.Next();
         const int j = value ? 1 : 0;
         hash_slot_t slot = table_[j];
-        value_reader.Next();
         HASH_INNER_LOOP();
       }
     }
@@ -423,7 +425,7 @@ class HashTableKernel<Type, Action, enable_if_binary<Type>> : public HashTable {
       data = GetValues<uint8_t>(arr, 2);
     }
 
-    auto action = static_cast<Action*>(this);
+    auto action = checked_cast<Action*>(this);
     RETURN_NOT_OK(action->Reserve(arr.length));
 
 #define HASH_INNER_LOOP()                                                           \
@@ -521,7 +523,7 @@ class HashTableKernel<Type, Action, enable_if_fixed_size_binary<Type>>
  public:
   HashTableKernel(const std::shared_ptr<DataType>& type, MemoryPool* pool)
       : HashTable(type, pool), dict_data_(pool), dict_size_(0) {
-    const auto& fw_type = static_cast<const FixedSizeBinaryType&>(*type);
+    const auto& fw_type = checked_cast<const FixedSizeBinaryType&>(*type);
     byte_width_ = fw_type.bit_width() / 8;
   }
 
@@ -537,7 +539,7 @@ class HashTableKernel<Type, Action, enable_if_fixed_size_binary<Type>>
 
     const uint8_t* data = GetValues<uint8_t>(arr, 1);
 
-    auto action = static_cast<Action*>(this);
+    auto action = checked_cast<Action*>(this);
     RETURN_NOT_OK(action->Reserve(arr.length));
 
 #define HASH_INNER_LOOP()                                                      \
@@ -644,7 +646,7 @@ class HashTableKernel<Type, Action, enable_if_8bit_int<Type>> : public HashTable
 
   Status Append(const ArrayData& arr) override {
     const T* values = GetValues<T>(arr, 1);
-    auto action = static_cast<Action*>(this);
+    auto action = checked_cast<Action*>(this);
     RETURN_NOT_OK(action->Reserve(arr.length));
 
 #define HASH_INNER_LOOP()                                      \

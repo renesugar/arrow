@@ -33,6 +33,7 @@
 #include "arrow/type.h"
 #include "arrow/type_traits.h"
 #include "arrow/util/bit-util.h"
+#include "arrow/util/checked_cast.h"
 #include "arrow/util/decimal.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/string.h"
@@ -157,7 +158,7 @@ class SchemaWriter {
     writer_->EndObject();
 
     if (type.id() == Type::DICTIONARY) {
-      const auto& dict_type = static_cast<const DictionaryType&>(type);
+      const auto& dict_type = checked_cast<const DictionaryType&>(type);
       RETURN_NOT_OK(WriteDictionaryMetadata(dict_type));
 
       const DataType& dictionary_type = *dict_type.dictionary()->type();
@@ -371,27 +372,42 @@ class ArrayWriter {
   template <typename T>
   typename std::enable_if<IsSignedInt<T>::value, void>::type WriteDataValues(
       const T& arr) {
+    static const char null_string[] = "0";
     const auto data = arr.raw_values();
-    for (int i = 0; i < arr.length(); ++i) {
-      writer_->Int64(data[i]);
+    for (int64_t i = 0; i < arr.length(); ++i) {
+      if (arr.IsValid(i)) {
+        writer_->Int64(data[i]);
+      } else {
+        writer_->RawNumber(null_string, sizeof(null_string));
+      }
     }
   }
 
   template <typename T>
   typename std::enable_if<IsUnsignedInt<T>::value, void>::type WriteDataValues(
       const T& arr) {
+    static const char null_string[] = "0";
     const auto data = arr.raw_values();
-    for (int i = 0; i < arr.length(); ++i) {
-      writer_->Uint64(data[i]);
+    for (int64_t i = 0; i < arr.length(); ++i) {
+      if (arr.IsValid(i)) {
+        writer_->Uint64(data[i]);
+      } else {
+        writer_->RawNumber(null_string, sizeof(null_string));
+      }
     }
   }
 
   template <typename T>
   typename std::enable_if<IsFloatingPoint<T>::value, void>::type WriteDataValues(
       const T& arr) {
+    static const char null_string[] = "0.";
     const auto data = arr.raw_values();
-    for (int i = 0; i < arr.length(); ++i) {
-      writer_->Double(data[i]);
+    for (int64_t i = 0; i < arr.length(); ++i) {
+      if (arr.IsValid(i)) {
+        writer_->Double(data[i]);
+      } else {
+        writer_->RawNumber(null_string, sizeof(null_string));
+      }
     }
   }
 
@@ -423,15 +439,24 @@ class ArrayWriter {
   }
 
   void WriteDataValues(const Decimal128Array& arr) {
+    static const char null_string[] = "0";
     for (int64_t i = 0; i < arr.length(); ++i) {
-      const Decimal128 value(arr.GetValue(i));
-      writer_->String(value.ToIntegerString());
+      if (arr.IsValid(i)) {
+        const Decimal128 value(arr.GetValue(i));
+        writer_->String(value.ToIntegerString());
+      } else {
+        writer_->String(null_string, sizeof(null_string));
+      }
     }
   }
 
   void WriteDataValues(const BooleanArray& arr) {
-    for (int i = 0; i < arr.length(); ++i) {
-      writer_->Bool(arr.Value(i));
+    for (int64_t i = 0; i < arr.length(); ++i) {
+      if (arr.IsValid(i)) {
+        writer_->Bool(arr.Value(i));
+      } else {
+        writer_->Bool(false);
+      }
     }
   }
 
@@ -516,13 +541,13 @@ class ArrayWriter {
   Status Visit(const ListArray& array) {
     WriteValidityField(array);
     WriteIntegerField("OFFSET", array.raw_value_offsets(), array.length() + 1);
-    const auto& type = static_cast<const ListType&>(*array.type());
+    const auto& type = checked_cast<const ListType&>(*array.type());
     return WriteChildren(type.children(), {array.values()});
   }
 
   Status Visit(const StructArray& array) {
     WriteValidityField(array);
-    const auto& type = static_cast<const StructType&>(*array.type());
+    const auto& type = checked_cast<const StructType&>(*array.type());
     std::vector<std::shared_ptr<Array>> children;
     children.reserve(array.num_fields());
     for (int i = 0; i < array.num_fields(); ++i) {
@@ -533,7 +558,7 @@ class ArrayWriter {
 
   Status Visit(const UnionArray& array) {
     WriteValidityField(array);
-    const auto& type = static_cast<const UnionType&>(*array.type());
+    const auto& type = checked_cast<const UnionType&>(*array.type());
 
     WriteIntegerField("TYPE_ID", array.raw_type_ids(), array.length());
     if (type.mode() == UnionMode::DENSE) {
@@ -690,7 +715,7 @@ static Status GetTime(const RjObject& json_type, std::shared_ptr<DataType>* type
     return Status::Invalid(ss.str());
   }
 
-  const auto& fw_type = static_cast<const FixedWidthType&>(**type);
+  const auto& fw_type = checked_cast<const FixedWidthType&>(**type);
 
   int bit_width = it_bit_width->value.GetInt();
   if (bit_width != fw_type.bit_width()) {

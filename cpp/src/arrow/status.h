@@ -18,6 +18,7 @@
 #include <cstring>
 #include <iosfwd>
 #include <string>
+#include <utility>
 
 #ifdef ARROW_EXTRA_ERROR_CONTEXT
 #include <sstream>
@@ -26,34 +27,11 @@
 #include "arrow/util/macros.h"
 #include "arrow/util/visibility.h"
 
-// Return the given status if it is not OK.
-#define ARROW_RETURN_NOT_OK(s)           \
-  do {                                   \
-    ::arrow::Status _s = (s);            \
-    if (ARROW_PREDICT_FALSE(!_s.ok())) { \
-      return _s;                         \
-    }                                    \
-  } while (false)
-
-// If 'to_call' returns a bad status, CHECK immediately with a logged message
-// of 'msg' followed by the status.
-#define ARROW_CHECK_OK_PREPEND(to_call, msg)                \
-  do {                                                      \
-    ::arrow::Status _s = (to_call);                         \
-    ARROW_CHECK(_s.ok()) << (msg) << ": " << _s.ToString(); \
-  } while (false)
-
-// If the status is bad, CHECK immediately, appending the status to the
-// logged message.
-#define ARROW_CHECK_OK(s) ARROW_CHECK_OK_PREPEND(s, "Bad status")
-
-namespace arrow {
-
 #ifdef ARROW_EXTRA_ERROR_CONTEXT
 
 #define RETURN_NOT_OK(s)                                                            \
   do {                                                                              \
-    Status _s = (s);                                                                \
+    ::arrow::Status _s = (s);                                                       \
     if (ARROW_PREDICT_FALSE(!_s.ok())) {                                            \
       std::stringstream ss;                                                         \
       ss << __FILE__ << ":" << __LINE__ << " code: " << #s << "\n" << _s.message(); \
@@ -65,7 +43,7 @@ namespace arrow {
 
 #define RETURN_NOT_OK(s)                 \
   do {                                   \
-    Status _s = (s);                     \
+    ::arrow::Status _s = (s);            \
     if (ARROW_PREDICT_FALSE(!_s.ok())) { \
       return _s;                         \
     }                                    \
@@ -75,12 +53,20 @@ namespace arrow {
 
 #define RETURN_NOT_OK_ELSE(s, else_) \
   do {                               \
-    Status _s = (s);                 \
+    ::arrow::Status _s = (s);        \
     if (!_s.ok()) {                  \
       else_;                         \
       return _s;                     \
     }                                \
   } while (false)
+
+// This is used by other codebases. The macros above
+// should probably have that prefix, but there is a
+// lot of code that already uses that macro and changing
+// it would be of no benefit.
+#define ARROW_RETURN_NOT_OK(s) RETURN_NOT_OK(s)
+
+namespace arrow {
 
 enum class StatusCode : char {
   OK = 0,
@@ -89,13 +75,15 @@ enum class StatusCode : char {
   TypeError = 3,
   Invalid = 4,
   IOError = 5,
+  CapacityError = 6,
   UnknownError = 9,
   NotImplemented = 10,
   SerializationError = 11,
   PythonError = 12,
   PlasmaObjectExists = 20,
   PlasmaObjectNonexistent = 21,
-  PlasmaStoreFull = 22
+  PlasmaStoreFull = 22,
+  PlasmaObjectAlreadySealed = 23,
 };
 
 #if defined(__clang__)
@@ -113,7 +101,17 @@ class ARROW_EXPORT Status {
 
   // Copy the specified status.
   Status(const Status& s);
-  void operator=(const Status& s);
+  Status& operator=(const Status& s);
+
+  // Move the specified status.
+  Status(Status&& s);
+  Status& operator=(Status&& s);
+
+  // AND the statuses.
+  Status operator&(const Status& s) const;
+  Status operator&(Status&& s) const;
+  Status& operator&=(const Status& s);
+  Status& operator&=(Status&& s);
 
   // Return a success status.
   static Status OK() { return Status(); }
@@ -143,6 +141,10 @@ class ARROW_EXPORT Status {
     return Status(StatusCode::Invalid, msg);
   }
 
+  static Status CapacityError(const std::string& msg) {
+    return Status(StatusCode::CapacityError, msg);
+  }
+
   static Status IOError(const std::string& msg) {
     return Status(StatusCode::IOError, msg);
   }
@@ -159,6 +161,10 @@ class ARROW_EXPORT Status {
     return Status(StatusCode::PlasmaObjectNonexistent, msg);
   }
 
+  static Status PlasmaObjectAlreadySealed(const std::string& msg) {
+    return Status(StatusCode::PlasmaObjectAlreadySealed, msg);
+  }
+
   static Status PlasmaStoreFull(const std::string& msg) {
     return Status(StatusCode::PlasmaStoreFull, msg);
   }
@@ -170,6 +176,7 @@ class ARROW_EXPORT Status {
   bool IsKeyError() const { return code() == StatusCode::KeyError; }
   bool IsInvalid() const { return code() == StatusCode::Invalid; }
   bool IsIOError() const { return code() == StatusCode::IOError; }
+  bool IsCapacityError() const { return code() == StatusCode::CapacityError; }
   bool IsTypeError() const { return code() == StatusCode::TypeError; }
   bool IsUnknownError() const { return code() == StatusCode::UnknownError; }
   bool IsNotImplemented() const { return code() == StatusCode::NotImplemented; }
@@ -182,6 +189,10 @@ class ARROW_EXPORT Status {
   // An object was requested that doesn't exist in the plasma store.
   bool IsPlasmaObjectNonexistent() const {
     return code() == StatusCode::PlasmaObjectNonexistent;
+  }
+  // An already sealed object is tried to be sealed again.
+  bool IsPlasmaObjectAlreadySealed() const {
+    return code() == StatusCode::PlasmaObjectAlreadySealed;
   }
   // An object is too large to fit into the plasma store.
   bool IsPlasmaStoreFull() const { return code() == StatusCode::PlasmaStoreFull; }
@@ -207,7 +218,8 @@ class ARROW_EXPORT Status {
   // a `State` structure containing the error code and message(s)
   State* state_;
 
-  void CopyFrom(const State* s);
+  void CopyFrom(const Status& s);
+  void MoveFrom(Status& s);
 };
 
 static inline std::ostream& operator<<(std::ostream& os, const Status& x) {
@@ -215,15 +227,59 @@ static inline std::ostream& operator<<(std::ostream& os, const Status& x) {
   return os;
 }
 
+inline void Status::MoveFrom(Status& s) {
+  delete state_;
+  state_ = s.state_;
+  s.state_ = NULL;
+}
+
 inline Status::Status(const Status& s)
     : state_((s.state_ == NULL) ? NULL : new State(*s.state_)) {}
 
-inline void Status::operator=(const Status& s) {
+inline Status& Status::operator=(const Status& s) {
   // The following condition catches both aliasing (when this == &s),
   // and the common case where both s and *this are ok.
   if (state_ != s.state_) {
-    CopyFrom(s.state_);
+    CopyFrom(s);
   }
+  return *this;
+}
+
+inline Status::Status(Status&& s) : state_(s.state_) { s.state_ = NULL; }
+
+inline Status& Status::operator=(Status&& s) {
+  MoveFrom(s);
+  return *this;
+}
+
+inline Status Status::operator&(const Status& s) const {
+  if (ok()) {
+    return s;
+  } else {
+    return *this;
+  }
+}
+
+inline Status Status::operator&(Status&& s) const {
+  if (ok()) {
+    return std::move(s);
+  } else {
+    return *this;
+  }
+}
+
+inline Status& Status::operator&=(const Status& s) {
+  if (ok() && !s.ok()) {
+    CopyFrom(s);
+  }
+  return *this;
+}
+
+inline Status& Status::operator&=(Status&& s) {
+  if (ok() && !s.ok()) {
+    MoveFrom(s);
+  }
+  return *this;
 }
 
 }  // namespace arrow

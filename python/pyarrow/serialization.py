@@ -37,11 +37,22 @@ except ImportError:
 # python_to_arrow.cc)
 
 def _serialize_numpy_array_list(obj):
-    return obj.tolist(), obj.dtype.str
+    if obj.dtype.str != '|O':
+        # Make the array c_contiguous if necessary so that we can call change
+        # the view.
+        if not obj.flags.c_contiguous:
+            obj = np.ascontiguousarray(obj)
+        return obj.view('uint8'), obj.dtype.str
+    else:
+        return obj.tolist(), obj.dtype.str
 
 
 def _deserialize_numpy_array_list(data):
-    return np.array(data[0], dtype=np.dtype(data[1]))
+    if data[1] != '|O':
+        assert data[0].dtype == np.uint8
+        return data[0].view(data[1])
+    else:
+        return np.array(data[0], dtype=np.dtype(data[1]))
 
 
 def _pickle_to_buffer(x):
@@ -70,13 +81,31 @@ def _register_custom_pandas_handlers(context):
 
     import pyarrow.pandas_compat as pdcompat
 
+    sparse_type_error_msg = (
+        '{0} serialization is not supported.\n'
+        'Note that {0} is planned to be deprecated '
+        'in pandas future releases.\n'
+        'See https://github.com/pandas-dev/pandas/issues/19239 '
+        'for more information.'
+    )
+
     def _serialize_pandas_dataframe(obj):
+        if isinstance(obj, pd.SparseDataFrame):
+            raise NotImplementedError(
+                sparse_type_error_msg.format('SparseDataFrame')
+            )
+
         return pdcompat.dataframe_to_serialized_dict(obj)
 
     def _deserialize_pandas_dataframe(data):
         return pdcompat.serialized_dict_to_dataframe(data)
 
     def _serialize_pandas_series(obj):
+        if isinstance(obj, pd.SparseSeries):
+            raise NotImplementedError(
+                sparse_type_error_msg.format('SparseSeries')
+            )
+
         return _serialize_pandas_dataframe(pd.DataFrame({obj.name: obj}))
 
     def _deserialize_pandas_series(data):
@@ -114,7 +143,7 @@ def register_torch_serialization_handlers(serialization_context):
 
         for t in [torch.FloatTensor, torch.DoubleTensor, torch.HalfTensor,
                   torch.ByteTensor, torch.CharTensor, torch.ShortTensor,
-                  torch.IntTensor, torch.LongTensor]:
+                  torch.IntTensor, torch.LongTensor, torch.Tensor]:
             serialization_context.register_type(
                 t, "torch." + t.__name__,
                 custom_serializer=_serialize_torch_tensor,

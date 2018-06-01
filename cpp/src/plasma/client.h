@@ -18,13 +18,9 @@
 #ifndef PLASMA_CLIENT_H
 #define PLASMA_CLIENT_H
 
-#include <stdbool.h>
-#include <time.h>
-
-#include <deque>
+#include <functional>
 #include <memory>
 #include <string>
-#include <unordered_map>
 #include <vector>
 
 #include "arrow/buffer.h"
@@ -32,19 +28,20 @@
 #include "arrow/util/macros.h"
 #include "arrow/util/visibility.h"
 #include "plasma/common.h"
-#ifdef PLASMA_GPU
-#include "arrow/gpu/cuda_api.h"
-#endif
 
 using arrow::Buffer;
 using arrow::Status;
 
 namespace plasma {
 
-#define PLASMA_DEFAULT_RELEASE_DELAY 64
+ARROW_DEPRECATED("PLASMA_DEFAULT_RELEASE_DELAY is deprecated")
+constexpr int64_t kDeprecatedPlasmaDefaultReleaseDelay = 64;
+#define PLASMA_DEFAULT_RELEASE_DELAY plasma::kDeprecatedPlasmaDefaultReleaseDelay
 
-// Use 100MB as an overestimate of the L3 cache size.
-constexpr int64_t kL3CacheSizeBytes = 100000000;
+/// We keep a queue of unreleased objects cached in the client until we start
+/// sending release requests to the store. This is to avoid frequently mapping
+/// and unmapping objects and evicting data from processor caches.
+constexpr int64_t kPlasmaDefaultReleaseDelay = 64;
 
 /// Object buffer data structure.
 struct ObjectBuffer {
@@ -56,32 +53,9 @@ struct ObjectBuffer {
   int device_num;
 };
 
-/// Configuration options for the plasma client.
-struct PlasmaClientConfig {
-  /// Number of release calls we wait until the object is actually released.
-  /// This allows us to avoid invalidating the cpu cache on workers if objects
-  /// are reused accross tasks.
-  size_t release_delay;
-};
-
-struct ClientMmapTableEntry {
-  /// The result of mmap for this file descriptor.
-  uint8_t* pointer;
-  /// The length of the memory-mapped file.
-  size_t length;
-  /// The number of objects in this memory-mapped file that are currently being
-  /// used by the client. When this count reaches zeros, we unmap the file.
-  int count;
-};
-
-struct ObjectInUseEntry;
-struct ObjectRequest;
-struct PlasmaObject;
-
 class ARROW_EXPORT PlasmaClient {
  public:
   PlasmaClient();
-
   ~PlasmaClient();
 
   /// Connect to the local plasma store and plasma manager. Return
@@ -97,8 +71,8 @@ class ARROW_EXPORT PlasmaClient {
   /// \param num_retries number of attempts to connect to IPC socket, default 50
   /// \return The return status.
   Status Connect(const std::string& store_socket_name,
-                 const std::string& manager_socket_name, int release_delay,
-                 int num_retries = -1);
+                 const std::string& manager_socket_name,
+                 int release_delay = kPlasmaDefaultReleaseDelay, int num_retries = -1);
 
   /// Create an object in the Plasma Store. Any metadata for this object must be
   /// be passed in when the object is created.
@@ -342,69 +316,19 @@ class ARROW_EXPORT PlasmaClient {
   int get_manager_fd() const;
 
  private:
+  friend class PlasmaBuffer;
   FRIEND_TEST(TestPlasmaStore, GetTest);
   FRIEND_TEST(TestPlasmaStore, LegacyGetTest);
   FRIEND_TEST(TestPlasmaStore, AbortTest);
-
-  /// This is a helper method for unmapping objects for which all references have
-  /// gone out of scope, either by calling Release or Abort.
-  ///
-  /// @param object_id The object ID whose data we should unmap.
-  Status UnmapObject(const ObjectID& object_id);
 
   /// This is a helper method that flushes all pending release calls to the
   /// store.
   Status FlushReleaseHistory();
 
-  Status PerformRelease(const ObjectID& object_id);
-
-  /// Common helper for Get() variants
-  Status GetBuffers(const ObjectID* object_ids, int64_t num_objects, int64_t timeout_ms,
-                    const std::function<std::shared_ptr<Buffer>(
-                        const ObjectID&, const std::shared_ptr<Buffer>&)>& wrap_buffer,
-                    ObjectBuffer* object_buffers);
-
   bool IsInUse(const ObjectID& object_id);
 
-  uint8_t* lookup_or_mmap(int fd, int store_fd_val, int64_t map_size);
-
-  uint8_t* lookup_mmapped_file(int store_fd_val);
-
-  void increment_object_count(const ObjectID& object_id, PlasmaObject* object,
-                              bool is_sealed);
-
-  /// File descriptor of the Unix domain socket that connects to the store.
-  int store_conn_;
-  /// File descriptor of the Unix domain socket that connects to the manager.
-  int manager_conn_;
-  /// Table of dlmalloc buffer files that have been memory mapped so far. This
-  /// is a hash table mapping a file descriptor to a struct containing the
-  /// address of the corresponding memory-mapped file.
-  std::unordered_map<int, ClientMmapTableEntry> mmap_table_;
-  /// A hash table of the object IDs that are currently being used by this
-  /// client.
-  std::unordered_map<ObjectID, std::unique_ptr<ObjectInUseEntry>, UniqueIDHasher>
-      objects_in_use_;
-  /// Object IDs of the last few release calls. This is a deque and
-  /// is used to delay releasing objects to see if they can be reused by
-  /// subsequent tasks so we do not unneccessarily invalidate cpu caches.
-  /// TODO(pcm): replace this with a proper lru cache using the size of the L3
-  /// cache.
-  std::deque<ObjectID> release_history_;
-  /// The number of bytes in the combined objects that are held in the release
-  /// history doubly-linked list. If this is too large then the client starts
-  /// releasing objects.
-  int64_t in_use_object_bytes_;
-  /// Configuration options for the plasma client.
-  PlasmaClientConfig config_;
-  /// The amount of memory available to the Plasma store. The client needs this
-  /// information to make sure that it does not delay in releasing so much
-  /// memory that the store is unable to evict enough objects to free up space.
-  int64_t store_capacity_;
-#ifdef PLASMA_GPU
-  /// Cuda Device Manager.
-  arrow::gpu::CudaDeviceManager* manager_;
-#endif
+  class ARROW_NO_EXPORT Impl;
+  std::shared_ptr<Impl> impl_;
 };
 
 }  // namespace plasma
