@@ -18,11 +18,12 @@
 #include "arrow/memory_pool.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
-#include <mutex>
+#include <memory>
 #include <sstream>  // IWYU pragma: keep
 
 #include "arrow/status.h"
@@ -86,22 +87,43 @@ MemoryPool::~MemoryPool() {}
 
 int64_t MemoryPool::max_memory() const { return -1; }
 
+///////////////////////////////////////////////////////////////////////
+// Helper tracking memory statistics
+
+class MemoryPoolStats {
+ public:
+  MemoryPoolStats() : bytes_allocated_(0), max_memory_(0) {}
+
+  int64_t max_memory() const { return max_memory_.load(); }
+
+  int64_t bytes_allocated() const { return bytes_allocated_.load(); }
+
+  inline void UpdateAllocatedBytes(int64_t diff) {
+    auto allocated = bytes_allocated_.fetch_add(diff) + diff;
+    DCHECK_GE(allocated, 0) << "allocation counter became negative";
+    // "maximum" allocated memory is ill-defined in multi-threaded code,
+    // so don't try to be too rigorous here
+    if (diff > 0 && allocated > max_memory_) {
+      max_memory_ = allocated;
+    }
+  }
+
+ protected:
+  std::atomic<int64_t> bytes_allocated_;
+  std::atomic<int64_t> max_memory_;
+};
+
+///////////////////////////////////////////////////////////////////////
+// Default MemoryPool implementation
+
 class DefaultMemoryPool : public MemoryPool {
  public:
-  DefaultMemoryPool() : bytes_allocated_(0) { max_memory_ = 0; }
-
   ~DefaultMemoryPool() override {}
 
   Status Allocate(int64_t size, uint8_t** out) override {
     RETURN_NOT_OK(AllocateAligned(size, out));
-    bytes_allocated_ += size;
 
-    {
-      std::lock_guard<std::mutex> guard(lock_);
-      if (bytes_allocated_ > max_memory_) {
-        max_memory_ = bytes_allocated_.load();
-      }
-    }
+    stats_.UpdateAllocatedBytes(size);
     return Status::OK();
   }
 
@@ -132,21 +154,13 @@ class DefaultMemoryPool : public MemoryPool {
     *ptr = out;
 #endif  // defined(ARROW_JEMALLOC)
 
-    bytes_allocated_ += new_size - old_size;
-    {
-      std::lock_guard<std::mutex> guard(lock_);
-      if (bytes_allocated_ > max_memory_) {
-        max_memory_ = bytes_allocated_.load();
-      }
-    }
-
+    stats_.UpdateAllocatedBytes(new_size - old_size);
     return Status::OK();
   }
 
-  int64_t bytes_allocated() const override { return bytes_allocated_.load(); }
+  int64_t bytes_allocated() const override { return stats_.bytes_allocated(); }
 
   void Free(uint8_t* buffer, int64_t size) override {
-    DCHECK_GE(bytes_allocated_, size);
 #ifdef _MSC_VER
     _aligned_free(buffer);
 #elif defined(ARROW_JEMALLOC)
@@ -154,21 +168,22 @@ class DefaultMemoryPool : public MemoryPool {
 #else
     std::free(buffer);
 #endif
-    bytes_allocated_ -= size;
+    stats_.UpdateAllocatedBytes(-size);
   }
 
-  int64_t max_memory() const override { return max_memory_.load(); }
+  int64_t max_memory() const override { return stats_.max_memory(); }
 
  private:
-  mutable std::mutex lock_;
-  std::atomic<int64_t> bytes_allocated_;
-  std::atomic<int64_t> max_memory_;
+  MemoryPoolStats stats_;
 };
 
 MemoryPool* default_memory_pool() {
   static DefaultMemoryPool default_memory_pool_;
   return &default_memory_pool_;
 }
+
+///////////////////////////////////////////////////////////////////////
+// LoggingMemoryPool implementation
 
 LoggingMemoryPool::LoggingMemoryPool(MemoryPool* pool) : pool_(pool) {}
 
@@ -201,4 +216,60 @@ int64_t LoggingMemoryPool::max_memory() const {
   std::cout << "max_memory: " << mem << std::endl;
   return mem;
 }
+
+///////////////////////////////////////////////////////////////////////
+// ProxyMemoryPool implementation
+
+class ProxyMemoryPool::ProxyMemoryPoolImpl {
+ public:
+  explicit ProxyMemoryPoolImpl(MemoryPool* pool) : pool_(pool) {}
+
+  Status Allocate(int64_t size, uint8_t** out) {
+    RETURN_NOT_OK(pool_->Allocate(size, out));
+    stats_.UpdateAllocatedBytes(size);
+    return Status::OK();
+  }
+
+  Status Reallocate(int64_t old_size, int64_t new_size, uint8_t** ptr) {
+    RETURN_NOT_OK(pool_->Reallocate(old_size, new_size, ptr));
+    stats_.UpdateAllocatedBytes(new_size - old_size);
+    return Status::OK();
+  }
+
+  void Free(uint8_t* buffer, int64_t size) {
+    pool_->Free(buffer, size);
+    stats_.UpdateAllocatedBytes(-size);
+  }
+
+  int64_t bytes_allocated() const { return stats_.bytes_allocated(); }
+
+  int64_t max_memory() const { return stats_.max_memory(); }
+
+ private:
+  MemoryPool* pool_;
+  MemoryPoolStats stats_;
+};
+
+ProxyMemoryPool::ProxyMemoryPool(MemoryPool* pool) {
+  impl_.reset(new ProxyMemoryPoolImpl(pool));
+}
+
+ProxyMemoryPool::~ProxyMemoryPool() {}
+
+Status ProxyMemoryPool::Allocate(int64_t size, uint8_t** out) {
+  return impl_->Allocate(size, out);
+}
+
+Status ProxyMemoryPool::Reallocate(int64_t old_size, int64_t new_size, uint8_t** ptr) {
+  return impl_->Reallocate(old_size, new_size, ptr);
+}
+
+void ProxyMemoryPool::Free(uint8_t* buffer, int64_t size) {
+  return impl_->Free(buffer, size);
+}
+
+int64_t ProxyMemoryPool::bytes_allocated() const { return impl_->bytes_allocated(); }
+
+int64_t ProxyMemoryPool::max_memory() const { return impl_->max_memory(); }
+
 }  // namespace arrow

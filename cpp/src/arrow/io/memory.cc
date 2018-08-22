@@ -68,6 +68,7 @@ Status BufferOutputStream::Close() {
 
 Status BufferOutputStream::Finish(std::shared_ptr<Buffer>* result) {
   RETURN_NOT_OK(Close());
+  buffer_->ZeroPadding();
   *result = buffer_;
   buffer_ = nullptr;
   is_open_ = false;
@@ -150,8 +151,8 @@ class FixedSizeBufferWriter::FixedSizeBufferWriterImpl {
   }
 
   Status Seek(int64_t position) {
-    if (position < 0 || position >= size_) {
-      return Status::IOError("position out of bounds");
+    if (position < 0 || position > size_) {
+      return Status::IOError("Seek out of bounds");
     }
     position_ = position;
     return Status::OK();
@@ -163,6 +164,9 @@ class FixedSizeBufferWriter::FixedSizeBufferWriterImpl {
   }
 
   Status Write(const void* data, int64_t nbytes) {
+    if (position_ + nbytes > size_) {
+      return Status::IOError("Write out of bounds");
+    }
     if (nbytes > memcopy_threshold_ && memcopy_num_threads_ > 1) {
       internal::parallel_memcopy(mutable_data_ + position_,
                                  reinterpret_cast<const uint8_t*>(data), nbytes,
@@ -301,8 +305,8 @@ Status BufferReader::GetSize(int64_t* size) {
 }
 
 Status BufferReader::Seek(int64_t position) {
-  if (position < 0 || position >= size_) {
-    return Status::IOError("position out of bounds");
+  if (position < 0 || position > size_) {
+    return Status::IOError("Seek out of bounds");
   }
 
   position_ = position;

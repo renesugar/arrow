@@ -39,7 +39,7 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-conversion")
 # Compile flatbuffers
 
 set(PLASMA_FBS_SRC "${CMAKE_CURRENT_LIST_DIR}/format/plasma.fbs" "${CMAKE_CURRENT_LIST_DIR}/format/common.fbs")
-set(OUTPUT_DIR ${CMAKE_CURRENT_LIST_DIR}/)
+set(OUTPUT_DIR ${CMAKE_BINARY_DIR}/src/plasma)
 
 set(PLASMA_FBS_OUTPUT_FILES
   "${OUTPUT_DIR}/common_generated.h"
@@ -57,7 +57,7 @@ add_custom_command(
   # flatbuffers message Message, which can be used to store deserialized
   # messages in data structures. This is currently used for ObjectInfo for
   # example.
-  COMMAND ${FLATBUFFERS_COMPILER} -c -o ${OUTPUT_DIR} ${PLASMA_FBS_SRC} --gen-object-api
+  COMMAND ${FLATBUFFERS_COMPILER} -c -o ${OUTPUT_DIR} ${PLASMA_FBS_SRC} --gen-object-api --scoped-enums
   DEPENDS ${PLASMA_FBS_SRC}
   COMMENT "Running flatc compiler on ${PLASMA_FBS_SRC}"
   VERBATIM)
@@ -106,6 +106,7 @@ if ("${COMPILER_FAMILY}" STREQUAL "clang")
     APPEND_STRING
     PROPERTY COMPILE_FLAGS
     " -Wno-parentheses-equality \
+-Wno-null-pointer-arithmetic \
 -Wno-shorten-64-to-32 \
 -Wno-unused-macros")
 
@@ -123,8 +124,8 @@ if ("${COMPILER_FAMILY}" STREQUAL "gcc")
     " -Wno-conversion")
 endif()
 
-add_executable(plasma_store store.cc)
-target_link_libraries(plasma_store plasma_static ${PLASMA_LINK_LIBS})
+add_executable(plasma_store_server store.cc)
+target_link_libraries(plasma_store_server plasma_static ${PLASMA_LINK_LIBS})
 
 if (ARROW_RPATH_ORIGIN)
   if (APPLE)
@@ -132,25 +133,21 @@ if (ARROW_RPATH_ORIGIN)
   else()
     set(_lib_install_rpath "\$ORIGIN")
   endif()
-  set_target_properties(plasma_store PROPERTIES
+  set_target_properties(plasma_store_server PROPERTIES
       INSTALL_RPATH ${_lib_install_rpath})
 endif()
 
 # Headers: top level
 install(FILES
   common.h
-  common_generated.h
   compat.h
   client.h
   events.h
-  plasma.h
-  plasma_generated.h
-  protocol.h
   DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/plasma")
 
 # Plasma store
-set_target_properties(plasma_store PROPERTIES INSTALL_RPATH_USE_LINK_PATH TRUE)
-install(TARGETS plasma_store DESTINATION ${CMAKE_INSTALL_BINDIR})
+set_target_properties(plasma_store_server PROPERTIES INSTALL_RPATH_USE_LINK_PATH TRUE)
+install(TARGETS plasma_store_server DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # pkg-config support
 configure_file(plasma.pc.in
@@ -199,7 +196,8 @@ endif()
 # Unit tests
 #######################################
 
-ADD_ARROW_TEST(test/serialization_tests)
-ARROW_TEST_LINK_LIBRARIES(test/serialization_tests plasma_static ${PLASMA_LINK_LIBS})
-ADD_ARROW_TEST(test/client_tests)
-ARROW_TEST_LINK_LIBRARIES(test/client_tests plasma_static ${PLASMA_LINK_LIBS})
+ADD_ARROW_TEST(test/serialization_tests
+  EXTRA_LINK_LIBS plasma_static ${PLASMA_LINK_LIBS})
+ADD_ARROW_TEST(test/client_tests
+  EXTRA_LINK_LIBS plasma_static ${PLASMA_LINK_LIBS}
+  EXTRA_DEPENDENCIES plasma_store_server)

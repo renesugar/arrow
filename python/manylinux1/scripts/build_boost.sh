@@ -19,7 +19,7 @@
 BOOST_VERSION=1.66.0
 BOOST_VERSION_UNDERSCORE=${BOOST_VERSION//\./_}
 
-wget --no-check-certificate https://dl.bintray.com/boostorg/release/${BOOST_VERSION}/source/boost_${BOOST_VERSION_UNDERSCORE}.tar.gz -O /boost_${BOOST_VERSION_UNDERSCORE}.tar.gz
+curl -sL https://dl.bintray.com/boostorg/release/${BOOST_VERSION}/source/boost_${BOOST_VERSION_UNDERSCORE}.tar.gz -o /boost_${BOOST_VERSION_UNDERSCORE}.tar.gz
 tar xf boost_${BOOST_VERSION_UNDERSCORE}.tar.gz
 mkdir /arrow_boost
 pushd /boost_${BOOST_VERSION_UNDERSCORE}
@@ -31,7 +31,7 @@ popd
 pushd /arrow_boost
 ls -l
 ./bootstrap.sh
-./bjam cxxflags='-std=c++11 -fPIC' cflags=-fPIC linkflags="-std=c++11" variant=release link=shared --prefix=/arrow_boost_dist --with-filesystem --with-date_time --with-system --with-regex install
+./bjam dll-path="'\$ORIGIN/'" cxxflags='-std=c++11 -fPIC' cflags=-fPIC linkflags="-std=c++11" variant=release link=shared --prefix=/arrow_boost_dist --with-filesystem --with-date_time --with-system --with-regex install
 popd
 rm -rf boost_${BOOST_VERSION_UNDERSCORE}.tar.gz boost_${BOOST_VERSION_UNDERSCORE} arrow_boost
 # Boost always install header-only parts but they also take up quite some space.

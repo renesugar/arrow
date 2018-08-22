@@ -92,7 +92,7 @@ endfunction()
 function(ADD_ARROW_LIB LIB_NAME)
   set(options)
   set(one_value_args SHARED_LINK_FLAGS)
-  set(multi_value_args SOURCES STATIC_LINK_LIBS STATIC_PRIVATE_LINK_LIBS SHARED_LINK_LIBS SHARED_PRIVATE_LINK_LIBS DEPENDENCIES)
+  set(multi_value_args SOURCES STATIC_LINK_LIBS STATIC_PRIVATE_LINK_LIBS SHARED_LINK_LIBS SHARED_PRIVATE_LINK_LIBS EXTRA_INCLUDES DEPENDENCIES)
   cmake_parse_arguments(ARG "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN})
   if(ARG_UNPARSED_ARGUMENTS)
     message(SEND_ERROR "Error: unrecognized arguments: ${ARG_UNPARSED_ARGUMENTS}")
@@ -101,6 +101,10 @@ function(ADD_ARROW_LIB LIB_NAME)
   if(MSVC)
     set(LIB_DEPS ${ARG_SOURCES})
     set(EXTRA_DEPS ${ARG_DEPENDENCIES})
+
+    if (ARG_EXTRA_INCLUDES)
+      set(LIB_INCLUDES ${ARG_EXTRA_INCLUDES})
+    endif()
   else()
     add_library(${LIB_NAME}_objlib OBJECT
       ${ARG_SOURCES})
@@ -110,7 +114,14 @@ function(ADD_ARROW_LIB LIB_NAME)
       add_dependencies(${LIB_NAME}_objlib ${ARG_DEPENDENCIES})
     endif()
     set(LIB_DEPS $<TARGET_OBJECTS:${LIB_NAME}_objlib>)
+    set(LIB_INCLUDES)
     set(EXTRA_DEPS)
+
+    if (ARG_EXTRA_INCLUDES)
+      target_include_directories(${LIB_NAME}_objlib SYSTEM PUBLIC
+        ${ARG_EXTRA_INCLUDES}
+        )
+    endif()
   endif()
 
   set(RUNTIME_INSTALL_DIR bin)
@@ -119,6 +130,12 @@ function(ADD_ARROW_LIB LIB_NAME)
     add_library(${LIB_NAME}_shared SHARED ${LIB_DEPS})
     if (EXTRA_DEPS)
       add_dependencies(${LIB_NAME}_shared ${EXTRA_DEPS})
+    endif()
+
+    if (LIB_INCLUDES)
+      target_include_directories(${LIB_NAME}_shared SYSTEM PUBLIC
+        ${ARG_EXTRA_INCLUDES}
+        )
     endif()
 
     if(APPLE)
@@ -154,6 +171,18 @@ function(ADD_ARROW_LIB LIB_NAME)
             INSTALL_RPATH ${_lib_install_rpath})
     endif()
 
+    if (APPLE)
+      if (ARROW_INSTALL_NAME_RPATH)
+        set(_lib_install_name "@rpath")
+      else()
+        set(_lib_install_name "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}")
+      endif()
+      set_target_properties(${LIB_NAME}_shared
+        PROPERTIES
+        BUILD_WITH_INSTALL_RPATH ON
+        INSTALL_NAME_DIR "${_lib_install_name}")
+    endif()
+
     install(TARGETS ${LIB_NAME}_shared
       RUNTIME DESTINATION ${RUNTIME_INSTALL_DIR}
       LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -164,6 +193,12 @@ function(ADD_ARROW_LIB LIB_NAME)
     add_library(${LIB_NAME}_static STATIC ${LIB_DEPS})
     if(EXTRA_DEPS)
       add_dependencies(${LIB_NAME}_static ${EXTRA_DEPS})
+    endif()
+
+    if (LIB_INCLUDES)
+      target_include_directories(${LIB_NAME}_static SYSTEM PUBLIC
+        ${ARG_EXTRA_INCLUDES}
+        )
     endif()
 
     if (MSVC)
@@ -186,18 +221,6 @@ function(ADD_ARROW_LIB LIB_NAME)
       RUNTIME DESTINATION ${RUNTIME_INSTALL_DIR}
       LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
       ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
-  endif()
-
-  if (APPLE)
-    if (ARROW_INSTALL_NAME_RPATH)
-      set(_lib_install_name "@rpath")
-    else()
-      set(_lib_install_name "${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}")
-    endif()
-    set_target_properties(${LIB_NAME}_shared
-      PROPERTIES
-      BUILD_WITH_INSTALL_RPATH ON
-      INSTALL_NAME_DIR "${_lib_install_name}")
   endif()
 
 endfunction()
@@ -284,11 +307,23 @@ endfunction()
 # Arguments after the test name will be passed to set_tests_properties().
 function(ADD_ARROW_TEST REL_TEST_NAME)
   set(options NO_VALGRIND)
-  set(single_value_args)
-  set(multi_value_args STATIC_LINK_LIBS)
+  set(one_value_args)
+  set(multi_value_args STATIC_LINK_LIBS EXTRA_LINK_LIBS EXTRA_INCLUDES EXTRA_DEPENDENCIES LABELS)
   cmake_parse_arguments(ARG "${options}" "${one_value_args}" "${multi_value_args}" ${ARGN})
   if(ARG_UNPARSED_ARGUMENTS)
     message(SEND_ERROR "Error: unrecognized arguments: ${ARG_UNPARSED_ARGUMENTS}")
+  endif()
+
+  if (NOT "${ARROW_TEST_INCLUDE_LABELS}" STREQUAL "")
+    set(_SKIP_TEST TRUE)
+    foreach (_INCLUDED_LABEL ${ARG_LABELS})
+      if ("${ARG_LABELS}" MATCHES "${_INCLUDED_LABEL}")
+        set(_SKIP_TEST FALSE)
+      endif()
+    endforeach()
+    if (_SKIP_TEST)
+      return()
+    endif()
   endif()
 
   if(NO_TESTS OR NOT ARROW_BUILD_STATIC)
@@ -307,6 +342,21 @@ function(ADD_ARROW_TEST REL_TEST_NAME)
     else()
       target_link_libraries(${TEST_NAME} ${ARROW_TEST_LINK_LIBS})
     endif()
+
+    if (ARG_EXTRA_LINK_LIBS)
+      target_link_libraries(${TEST_NAME} ${ARG_EXTRA_LINK_LIBS})
+    endif()
+
+    if (ARG_EXTRA_INCLUDES)
+      target_include_directories(${TEST_NAME} SYSTEM PUBLIC
+        ${ARG_EXTRA_INCLUDES}
+        )
+    endif()
+
+    if (ARG_EXTRA_DEPENDENCIES)
+      add_dependencies(${TEST_NAME} ${ARG_EXTRA_DEPENDENCIES})
+    endif()
+
     add_dependencies(unittest ${TEST_NAME})
   else()
     # No executable, just invoke the test (probably a script) directly.
@@ -327,7 +377,16 @@ function(ADD_ARROW_TEST REL_TEST_NAME)
     add_test(${TEST_NAME}
       ${BUILD_SUPPORT_DIR}/run-test.sh ${CMAKE_BINARY_DIR} test ${TEST_PATH})
   endif()
-  set_tests_properties(${TEST_NAME} PROPERTIES LABELS "unittest")
+
+  set_property(TEST ${TEST_NAME}
+    APPEND PROPERTY
+    LABELS "unittest")
+
+  if (ARG_LABELS)
+    set_property(TEST ${TEST_NAME}
+      APPEND PROPERTY
+      LABELS ${ARG_LABELS})
+  endif()
 endfunction()
 
 # A wrapper for add_dependencies() that is compatible with NO_TESTS.

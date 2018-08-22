@@ -35,6 +35,8 @@ constexpr int64_t kConnectTimeoutMs = 100;
 
 namespace plasma {
 
+using flatbuf::MessageType;
+
 Status WriteBytes(int fd, uint8_t* cursor, size_t length) {
   ssize_t nbytes = 0;
   size_t bytesleft = length;
@@ -59,7 +61,7 @@ Status WriteBytes(int fd, uint8_t* cursor, size_t length) {
   return Status::OK();
 }
 
-Status WriteMessage(int fd, int64_t type, int64_t length, uint8_t* bytes) {
+Status WriteMessage(int fd, MessageType type, int64_t length, uint8_t* bytes) {
   int64_t version = kPlasmaProtocolVersion;
   RETURN_NOT_OK(WriteBytes(fd, reinterpret_cast<uint8_t*>(&version), sizeof(version)));
   RETURN_NOT_OK(WriteBytes(fd, reinterpret_cast<uint8_t*>(&type), sizeof(type)));
@@ -90,28 +92,28 @@ Status ReadBytes(int fd, uint8_t* cursor, size_t length) {
   return Status::OK();
 }
 
-Status ReadMessage(int fd, int64_t* type, std::vector<uint8_t>* buffer) {
+Status ReadMessage(int fd, MessageType* type, std::vector<uint8_t>* buffer) {
   int64_t version;
   RETURN_NOT_OK_ELSE(ReadBytes(fd, reinterpret_cast<uint8_t*>(&version), sizeof(version)),
-                     *type = MessageType_PlasmaDisconnectClient);
+                     *type = MessageType::PlasmaDisconnectClient);
   ARROW_CHECK(version == kPlasmaProtocolVersion) << "version = " << version;
   RETURN_NOT_OK_ELSE(ReadBytes(fd, reinterpret_cast<uint8_t*>(type), sizeof(*type)),
-                     *type = MessageType_PlasmaDisconnectClient);
+                     *type = MessageType::PlasmaDisconnectClient);
   int64_t length_temp;
   RETURN_NOT_OK_ELSE(
       ReadBytes(fd, reinterpret_cast<uint8_t*>(&length_temp), sizeof(length_temp)),
-      *type = MessageType_PlasmaDisconnectClient);
+      *type = MessageType::PlasmaDisconnectClient);
   // The length must be read as an int64_t, but it should be used as a size_t.
   size_t length = static_cast<size_t>(length_temp);
   if (length > buffer->size()) {
     buffer->resize(length);
   }
   RETURN_NOT_OK_ELSE(ReadBytes(fd, buffer->data(), length),
-                     *type = MessageType_PlasmaDisconnectClient);
+                     *type = MessageType::PlasmaDisconnectClient);
   return Status::OK();
 }
 
-int bind_ipc_sock(const std::string& pathname, bool shall_listen) {
+int BindIpcSock(const std::string& pathname, bool shall_listen) {
   struct sockaddr_un socket_address;
   int socket_fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (socket_fd < 0) {
@@ -160,13 +162,13 @@ Status ConnectIpcSocketRetry(const std::string& pathname, int num_retries,
   if (timeout < 0) {
     timeout = kConnectTimeoutMs;
   }
-  *fd = connect_ipc_sock(pathname);
+  *fd = ConnectIpcSock(pathname);
   while (*fd < 0 && num_retries > 0) {
     ARROW_LOG(ERROR) << "Connection to IPC socket failed for pathname " << pathname
                      << ", retrying " << num_retries << " more times";
     // Sleep for timeout milliseconds.
     usleep(static_cast<int>(timeout * 1000));
-    *fd = connect_ipc_sock(pathname);
+    *fd = ConnectIpcSock(pathname);
     --num_retries;
   }
   // If we could not connect to the socket, exit.
@@ -178,7 +180,7 @@ Status ConnectIpcSocketRetry(const std::string& pathname, int num_retries,
   return Status::OK();
 }
 
-int connect_ipc_sock(const std::string& pathname) {
+int ConnectIpcSock(const std::string& pathname) {
   struct sockaddr_un socket_address;
   int socket_fd;
 
@@ -214,7 +216,7 @@ int AcceptClient(int socket_fd) {
   return client_fd;
 }
 
-std::unique_ptr<uint8_t[]> read_message_async(int sock) {
+std::unique_ptr<uint8_t[]> ReadMessageAsync(int sock) {
   int64_t size;
   Status s = ReadBytes(sock, reinterpret_cast<uint8_t*>(&size), sizeof(int64_t));
   if (!s.ok()) {

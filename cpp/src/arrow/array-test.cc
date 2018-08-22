@@ -35,11 +35,48 @@
 #include "arrow/type_traits.h"
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/decimal.h"
+#include "arrow/util/lazy.h"
 
 namespace arrow {
 
 using std::string;
 using std::vector;
+
+namespace {
+// used to prevent compiler optimizing away side-effect-less statements
+volatile int throw_away = 0;
+
+// checks if the padding of the buffers of the array is zero
+// also causes valgrind warnings if the padding bytes are uninitialized
+void AssertZeroPadded(const Array& array) {
+  for (const auto& buffer : array.data()->buffers) {
+    if (buffer) {
+      const int64_t padding = buffer->capacity() - buffer->size();
+      std::vector<uint8_t> zeros(padding);
+      ASSERT_EQ(0, memcmp(buffer->data() + buffer->size(), zeros.data(), padding));
+    }
+  }
+}
+
+// Check if the valid buffer bytes are initialized by
+// calling memcmp on them which will cause valgrind warnings otherwise
+void TestInitialized(const Array& array) {
+  for (const auto& buffer : array.data()->buffers) {
+    if (buffer) {
+      std::vector<uint8_t> zeros(buffer->capacity());
+      throw_away = memcmp(buffer->data(), zeros.data(), buffer->size());
+    }
+  }
+}
+
+template <typename BuilderType>
+void FinishAndCheckPadding(BuilderType* builder, std::shared_ptr<Array>* out) {
+  ASSERT_OK(builder->Finish(out));
+  AssertZeroPadded(**out);
+  TestInitialized(**out);
+}
+
+}  // namespace
 
 class TestArray : public ::testing::Test {
  public:
@@ -50,8 +87,9 @@ class TestArray : public ::testing::Test {
 };
 
 TEST_F(TestArray, TestNullCount) {
-  auto data = std::make_shared<PoolBuffer>(pool_);
-  auto null_bitmap = std::make_shared<PoolBuffer>(pool_);
+  // These are placeholders
+  auto data = std::make_shared<Buffer>(nullptr, 0);
+  auto null_bitmap = std::make_shared<Buffer>(nullptr, 0);
 
   std::unique_ptr<Int32Array> arr(new Int32Array(100, data, null_bitmap, 10));
   ASSERT_EQ(10, arr->null_count());
@@ -61,7 +99,9 @@ TEST_F(TestArray, TestNullCount) {
 }
 
 TEST_F(TestArray, TestLength) {
-  auto data = std::make_shared<PoolBuffer>(pool_);
+  // Placeholder buffer
+  auto data = std::make_shared<Buffer>(nullptr, 0);
+
   std::unique_ptr<Int32Array> arr(new Int32Array(100, data));
   ASSERT_EQ(arr->length(), 100);
 }
@@ -205,14 +245,23 @@ TEST_F(TestArray, TestIsNullIsValidNoNulls) {
 }
 
 TEST_F(TestArray, BuildLargeInMemoryArray) {
+#ifdef NDEBUG
   const int64_t length = static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1;
+#elif !defined(ARROW_VALGRIND)
+  // use a smaller size since the insert function isn't optimized properly on debug and
+  // the test takes a long time to complete
+  const int64_t length = 2 << 24;
+#else
+  // use an even smaller size with valgrind
+  const int64_t length = 2 << 20;
+#endif
 
   BooleanBuilder builder;
-  ASSERT_OK(builder.Reserve(length));
-  ASSERT_OK(builder.Advance(length));
+  std::vector<bool> zeros(length);
+  ASSERT_OK(builder.AppendValues(zeros));
 
   std::shared_ptr<Array> result;
-  ASSERT_OK(builder.Finish(&result));
+  FinishAndCheckPadding(&builder, &result);
 
   ASSERT_EQ(length, result->length());
 }
@@ -225,11 +274,13 @@ TEST_F(TestArray, TestCopy) {}
 TEST_F(TestBuilder, TestReserve) {
   UInt8Builder builder(pool_);
 
-  ASSERT_OK(builder.Init(10));
-  ASSERT_EQ(2, builder.null_bitmap()->size());
+  ASSERT_OK(builder.Resize(1000));
+  ASSERT_EQ(1000, builder.capacity());
 
-  ASSERT_OK(builder.Reserve(30));
-  ASSERT_EQ(4, builder.null_bitmap()->size());
+  // Builder only contains 0 elements, but calling Reserve will result in a round
+  // up to next power of 2
+  ASSERT_OK(builder.Reserve(1030));
+  ASSERT_EQ(BitUtil::NextPower2(1030), builder.capacity());
 }
 
 template <typename Attrs>
@@ -257,7 +308,7 @@ class TestPrimitiveBuilder : public TestBuilder {
     Attrs::draw(N, &draws_);
 
     valid_bytes_.resize(static_cast<size_t>(N));
-    test::random_null_bytes(N, pct_null, valid_bytes_.data());
+    random_null_bytes(N, pct_null, valid_bytes_.data());
   }
 
   void Check(const std::unique_ptr<BuilderType>& builder, bool nullable) {
@@ -272,7 +323,7 @@ class TestPrimitiveBuilder : public TestBuilder {
     if (nullable) {
       ASSERT_OK(
           BitUtil::BytesToBits(valid_bytes_, default_memory_pool(), &ex_null_bitmap));
-      ex_null_count = test::null_count(valid_bytes_);
+      ex_null_count = CountNulls(valid_bytes_);
     } else {
       ex_null_bitmap = nullptr;
     }
@@ -281,7 +332,7 @@ class TestPrimitiveBuilder : public TestBuilder {
         std::make_shared<ArrayType>(size, ex_data, ex_null_bitmap, ex_null_count);
 
     std::shared_ptr<Array> out;
-    ASSERT_OK(builder->Finish(&out));
+    FinishAndCheckPadding(builder.get(), &out);
 
     std::shared_ptr<ArrayType> result = std::dynamic_pointer_cast<ArrayType>(out);
 
@@ -289,7 +340,6 @@ class TestPrimitiveBuilder : public TestBuilder {
     ASSERT_EQ(0, builder->length());
     ASSERT_EQ(0, builder->capacity());
     ASSERT_EQ(0, builder->null_count());
-    ASSERT_EQ(nullptr, builder->data());
 
     ASSERT_EQ(ex_null_count, result->null_count());
     ASSERT_TRUE(result->Equals(*expected));
@@ -331,23 +381,23 @@ struct UniformIntSampleType<int8_t> {
                                         \
   static std::shared_ptr<DataType> type() { return std::make_shared<Type>(); }
 
-#define PINT_DECL(CapType, c_type)                                                       \
-  struct P##CapType {                                                                    \
-    PTYPE_DECL(CapType, c_type)                                                          \
-    static void draw(int64_t N, vector<T>* draws) {                                      \
-      using sample_type = typename UniformIntSampleType<c_type>::type;                   \
-      const T lower = std::numeric_limits<T>::min();                                     \
-      const T upper = std::numeric_limits<T>::max();                                     \
-      test::randint(N, static_cast<sample_type>(lower), static_cast<sample_type>(upper), \
-                    draws);                                                              \
-    }                                                                                    \
+#define PINT_DECL(CapType, c_type)                                                 \
+  struct P##CapType {                                                              \
+    PTYPE_DECL(CapType, c_type)                                                    \
+    static void draw(int64_t N, vector<T>* draws) {                                \
+      using sample_type = typename UniformIntSampleType<c_type>::type;             \
+      const T lower = std::numeric_limits<T>::min();                               \
+      const T upper = std::numeric_limits<T>::max();                               \
+      randint(N, static_cast<sample_type>(lower), static_cast<sample_type>(upper), \
+              draws);                                                              \
+    }                                                                              \
   }
 
 #define PFLOAT_DECL(CapType, c_type, LOWER, UPPER)  \
   struct P##CapType {                               \
     PTYPE_DECL(CapType, c_type)                     \
     static void draw(int64_t N, vector<T>* draws) { \
-      test::random_real(N, 0, LOWER, UPPER, draws); \
+      random_real(N, 0, LOWER, UPPER, draws);       \
     }                                               \
   }
 
@@ -373,8 +423,8 @@ void TestPrimitiveBuilder<PBoolean>::RandomData(int64_t N, double pct_null) {
   draws_.resize(static_cast<size_t>(N));
   valid_bytes_.resize(static_cast<size_t>(N));
 
-  test::random_null_bytes(N, 0.5, draws_.data());
-  test::random_null_bytes(N, pct_null, valid_bytes_.data());
+  random_null_bytes(N, 0.5, draws_.data());
+  random_null_bytes(N, pct_null, valid_bytes_.data());
 }
 
 template <>
@@ -395,7 +445,7 @@ void TestPrimitiveBuilder<PBoolean>::Check(const std::unique_ptr<BooleanBuilder>
   ASSERT_OK(BitUtil::BytesToBits(draws_, default_memory_pool(), &ex_data));
   if (nullable) {
     ASSERT_OK(BitUtil::BytesToBits(valid_bytes_, default_memory_pool(), &ex_null_bitmap));
-    ex_null_count = test::null_count(valid_bytes_);
+    ex_null_count = CountNulls(valid_bytes_);
   } else {
     ex_null_bitmap = nullptr;
   }
@@ -405,7 +455,8 @@ void TestPrimitiveBuilder<PBoolean>::Check(const std::unique_ptr<BooleanBuilder>
 
   // Finish builder and check result array
   std::shared_ptr<Array> out;
-  ASSERT_OK(builder->Finish(&out));
+  FinishAndCheckPadding(builder.get(), &out);
+
   std::shared_ptr<BooleanArray> result = std::dynamic_pointer_cast<BooleanArray>(out);
 
   ASSERT_EQ(ex_null_count, result->null_count());
@@ -428,7 +479,6 @@ void TestPrimitiveBuilder<PBoolean>::Check(const std::unique_ptr<BooleanBuilder>
   ASSERT_EQ(0, builder->length());
   ASSERT_EQ(0, builder->capacity());
   ASSERT_EQ(0, builder->null_count());
-  ASSERT_EQ(nullptr, builder->data());
 }
 
 typedef ::testing::Types<PBoolean, PUInt8, PUInt16, PUInt32, PUInt64, PInt8, PInt16,
@@ -438,13 +488,9 @@ typedef ::testing::Types<PBoolean, PUInt8, PUInt16, PUInt32, PUInt64, PInt8, PIn
 TYPED_TEST_CASE(TestPrimitiveBuilder, Primitives);
 
 TYPED_TEST(TestPrimitiveBuilder, TestInit) {
-  DECL_TYPE();
-
   int64_t n = 1000;
   ASSERT_OK(this->builder_->Reserve(n));
   ASSERT_EQ(BitUtil::NextPower2(n), this->builder_->capacity());
-  ASSERT_EQ(BitUtil::NextPower2(TypeTraits<Type>::bytes_required(n)),
-            this->builder_->data()->size());
 
   // unsure if this should go in all builder classes
   ASSERT_EQ(0, this->builder_->num_children());
@@ -456,11 +502,26 @@ TYPED_TEST(TestPrimitiveBuilder, TestAppendNull) {
     ASSERT_OK(this->builder_->AppendNull());
   }
 
-  std::shared_ptr<Array> result;
-  ASSERT_OK(this->builder_->Finish(&result));
+  std::shared_ptr<Array> out;
+  FinishAndCheckPadding(this->builder_.get(), &out);
+  auto result = std::dynamic_pointer_cast<typename TypeParam::ArrayType>(out);
 
   for (int64_t i = 0; i < size; ++i) {
     ASSERT_TRUE(result->IsNull(i)) << i;
+  }
+}
+
+TYPED_TEST(TestPrimitiveBuilder, TestAppendNulls) {
+  const int64_t size = 10;
+  const uint8_t valid_bytes[10] = {1, 0, 1, 0, 1, 0, 1, 0, 1, 0};
+
+  ASSERT_OK(this->builder_->AppendNulls(valid_bytes, size));
+
+  std::shared_ptr<Array> result;
+  FinishAndCheckPadding(this->builder_.get(), &result);
+
+  for (int64_t i = 0; i < size; ++i) {
+    ASSERT_EQ(result->IsValid(i), static_cast<bool>(valid_bytes[i]));
   }
 }
 
@@ -488,7 +549,7 @@ TYPED_TEST(TestPrimitiveBuilder, TestArrayDtorDealloc) {
 
   do {
     std::shared_ptr<Array> result;
-    ASSERT_OK(this->builder_->Finish(&result));
+    FinishAndCheckPadding(this->builder_.get(), &result);
   } while (false);
 
   ASSERT_EQ(memory_before, this->pool_->bytes_allocated());
@@ -656,6 +717,127 @@ TYPED_TEST(TestPrimitiveBuilder, TestAppendValues) {
   this->Check(this->builder_nn_, false);
 }
 
+TYPED_TEST(TestPrimitiveBuilder, TestAppendValuesIter) {
+  int64_t size = 10000;
+  this->RandomData(size);
+
+  ASSERT_OK(this->builder_->AppendValues(this->draws_.begin(), this->draws_.end(),
+                                         this->valid_bytes_.begin()));
+  ASSERT_OK(this->builder_nn_->AppendValues(this->draws_.begin(), this->draws_.end()));
+
+  ASSERT_EQ(size, this->builder_->length());
+  ASSERT_EQ(BitUtil::NextPower2(size), this->builder_->capacity());
+
+  this->Check(this->builder_, true);
+  this->Check(this->builder_nn_, false);
+}
+
+TYPED_TEST(TestPrimitiveBuilder, TestAppendValuesIterNullValid) {
+  int64_t size = 10000;
+  this->RandomData(size);
+
+  ASSERT_OK(this->builder_nn_->AppendValues(this->draws_.begin(),
+                                            this->draws_.begin() + size / 2,
+                                            static_cast<uint8_t*>(nullptr)));
+
+  ASSERT_EQ(BitUtil::NextPower2(size / 2), this->builder_nn_->capacity());
+
+  ASSERT_OK(this->builder_nn_->AppendValues(this->draws_.begin() + size / 2,
+                                            this->draws_.end(),
+                                            static_cast<uint64_t*>(nullptr)));
+
+  this->Check(this->builder_nn_, false);
+}
+
+TYPED_TEST(TestPrimitiveBuilder, TestAppendValuesLazyIter) {
+  DECL_T();
+
+  int64_t size = 10000;
+  this->RandomData(size);
+
+  auto& draws = this->draws_;
+  auto& valid_bytes = this->valid_bytes_;
+
+  auto doubler = [&draws](int64_t index) { return draws[index] * 2; };
+  auto lazy_iter = internal::MakeLazyRange(doubler, size);
+
+  ASSERT_OK(this->builder_->AppendValues(lazy_iter.begin(), lazy_iter.end(),
+                                         valid_bytes.begin()));
+
+  std::vector<T> doubled;
+  transform(draws.begin(), draws.end(), back_inserter(doubled),
+            [](T in) { return in * 2; });
+
+  std::shared_ptr<Array> result;
+  FinishAndCheckPadding(this->builder_.get(), &result);
+
+  std::shared_ptr<Array> expected;
+  ASSERT_OK(
+      this->builder_->AppendValues(doubled.data(), doubled.size(), valid_bytes.data()));
+  FinishAndCheckPadding(this->builder_.get(), &expected);
+
+  ASSERT_TRUE(expected->Equals(result));
+}
+
+TYPED_TEST(TestPrimitiveBuilder, TestAppendValuesIterConverted) {
+  DECL_T();
+  // find type we can safely convert the tested values to and from
+  using conversion_type =
+      typename std::conditional<std::is_floating_point<T>::value, double,
+                                typename std::conditional<std::is_unsigned<T>::value,
+                                                          uint64_t, int64_t>::type>::type;
+
+  int64_t size = 10000;
+  this->RandomData(size);
+
+  // append convertible values
+  vector<conversion_type> draws_converted(this->draws_.begin(), this->draws_.end());
+  vector<int32_t> valid_bytes_converted(this->valid_bytes_.begin(),
+                                        this->valid_bytes_.end());
+
+  auto cast_values = internal::MakeLazyRange(
+      [&draws_converted](int64_t index) {
+        return static_cast<T>(draws_converted[index]);
+      },
+      size);
+  auto cast_valid = internal::MakeLazyRange(
+      [&valid_bytes_converted](int64_t index) {
+        return static_cast<bool>(valid_bytes_converted[index]);
+      },
+      size);
+
+  ASSERT_OK(this->builder_->AppendValues(cast_values.begin(), cast_values.end(),
+                                         cast_valid.begin()));
+  ASSERT_OK(this->builder_nn_->AppendValues(cast_values.begin(), cast_values.end()));
+
+  ASSERT_EQ(size, this->builder_->length());
+  ASSERT_EQ(BitUtil::NextPower2(size), this->builder_->capacity());
+
+  ASSERT_EQ(size, this->builder_->length());
+  ASSERT_EQ(BitUtil::NextPower2(size), this->builder_->capacity());
+
+  this->Check(this->builder_, true);
+  this->Check(this->builder_nn_, false);
+}
+
+TYPED_TEST(TestPrimitiveBuilder, TestZeroPadded) {
+  DECL_T();
+
+  int64_t size = 10000;
+  this->RandomData(size);
+
+  vector<T>& draws = this->draws_;
+  vector<uint8_t>& valid_bytes = this->valid_bytes_;
+
+  // first slug
+  int64_t K = 1000;
+
+  ASSERT_OK(this->builder_->AppendValues(draws.data(), K, valid_bytes.data()));
+
+  std::shared_ptr<Array> out;
+  FinishAndCheckPadding(this->builder_.get(), &out);
+}
+
 TYPED_TEST(TestPrimitiveBuilder, TestAppendValuesStdBool) {
   // ARROW-1383
   DECL_T();
@@ -716,15 +898,10 @@ TYPED_TEST(TestPrimitiveBuilder, TestAdvance) {
 }
 
 TYPED_TEST(TestPrimitiveBuilder, TestResize) {
-  DECL_TYPE();
-
   int64_t cap = kMinBuilderCapacity * 2;
 
   ASSERT_OK(this->builder_->Reserve(cap));
   ASSERT_EQ(cap, this->builder_->capacity());
-
-  ASSERT_EQ(TypeTraits<Type>::bytes_required(cap), this->builder_->data()->size());
-  ASSERT_EQ(BitUtil::BytesForBits(cap), this->builder_->null_bitmap()->size());
 }
 
 TYPED_TEST(TestPrimitiveBuilder, TestReserve) {
@@ -746,8 +923,8 @@ TEST(TestBooleanBuilder, TestStdBoolVectorAppend) {
   std::vector<bool> values, is_valid;
 
   const int length = 10000;
-  test::random_is_valid(length, 0.5, &values);
-  test::random_is_valid(length, 0.1, &is_valid);
+  random_is_valid(length, 0.5, &values);
+  random_is_valid(length, 0.1, &is_valid);
 
   const int chunksize = 1000;
   for (int chunk = 0; chunk < length / chunksize; ++chunk) {
@@ -786,8 +963,8 @@ void CheckSliceApproxEquals() {
   vector<T> draws2;
 
   const uint32_t kSeed = 0;
-  test::random_real(kSize, kSeed, 0.0, 100.0, &draws1);
-  test::random_real(kSize, kSeed + 1, 0.0, 100.0, &draws2);
+  random_real(kSize, kSeed, 0.0, 100.0, &draws1);
+  random_real(kSize, kSeed + 1, 0.0, 100.0, &draws2);
 
   // Make the draws equal in the sliced segment, but unequal elsewhere (to
   // catch not using the slice offset)
@@ -796,7 +973,7 @@ void CheckSliceApproxEquals() {
   }
 
   vector<bool> is_valid;
-  test::random_is_valid(kSize, 0.1, &is_valid);
+  random_is_valid(kSize, 0.1, &is_valid);
 
   std::shared_ptr<Array> array1, array2;
   ArrayFromVector<TYPE, T>(is_valid, draws1, &array1);
@@ -829,10 +1006,10 @@ class TestStringArray : public ::testing::Test {
 
   void MakeArray() {
     length_ = static_cast<int64_t>(offsets_.size()) - 1;
-    value_buf_ = test::GetBufferFromVector(chars_);
-    offsets_buf_ = test::GetBufferFromVector(offsets_);
+    value_buf_ = GetBufferFromVector(chars_);
+    offsets_buf_ = GetBufferFromVector(offsets_);
     ASSERT_OK(BitUtil::BytesToBits(valid_bytes_, default_memory_pool(), &null_bitmap_));
-    null_count_ = test::null_count(valid_bytes_);
+    null_count_ = CountNulls(valid_bytes_);
 
     strings_ = std::make_shared<StringArray>(length_, offsets_buf_, value_buf_,
                                              null_bitmap_, null_count_);
@@ -894,7 +1071,7 @@ TEST_F(TestStringArray, TestGetString) {
 
 TEST_F(TestStringArray, TestEmptyStringComparison) {
   offsets_ = {0, 0, 0, 0, 0, 0};
-  offsets_buf_ = test::GetBufferFromVector(offsets_);
+  offsets_buf_ = GetBufferFromVector(offsets_);
   length_ = static_cast<int64_t>(offsets_.size() - 1);
 
   auto strings_a = std::make_shared<StringArray>(length_, offsets_buf_, nullptr,
@@ -924,7 +1101,7 @@ TEST_F(TestStringArray, CompareNullByteSlots) {
   ASSERT_OK(builder3.Append("baz"));
 
   std::shared_ptr<Array> array, array2, array3;
-  ASSERT_OK(builder.Finish(&array));
+  FinishAndCheckPadding(&builder, &array);
   ASSERT_OK(builder2.Finish(&array2));
   ASSERT_OK(builder3.Finish(&array3));
 
@@ -971,7 +1148,7 @@ class TestStringBuilder : public TestBuilder {
 
   void Done() {
     std::shared_ptr<Array> out;
-    EXPECT_OK(builder_->Finish(&out));
+    FinishAndCheckPadding(builder_.get(), &out);
 
     result_ = std::dynamic_pointer_cast<StringArray>(out);
     ASSERT_OK(ValidateArray(*result_));
@@ -1141,11 +1318,11 @@ class TestBinaryArray : public ::testing::Test {
 
   void MakeArray() {
     length_ = static_cast<int64_t>(offsets_.size() - 1);
-    value_buf_ = test::GetBufferFromVector(chars_);
-    offsets_buf_ = test::GetBufferFromVector(offsets_);
+    value_buf_ = GetBufferFromVector(chars_);
+    offsets_buf_ = GetBufferFromVector(offsets_);
 
     ASSERT_OK(BitUtil::BytesToBits(valid_bytes_, default_memory_pool(), &null_bitmap_));
-    null_count_ = test::null_count(valid_bytes_);
+    null_count_ = CountNulls(valid_bytes_);
 
     strings_ = std::make_shared<BinaryArray>(length_, offsets_buf_, value_buf_,
                                              null_bitmap_, null_count_);
@@ -1207,6 +1384,21 @@ TEST_F(TestBinaryArray, TestGetValue) {
   }
 }
 
+TEST_F(TestBinaryArray, TestNullValuesInitialized) {
+  for (size_t i = 0; i < expected_.size(); ++i) {
+    if (valid_bytes_[i] == 0) {
+      ASSERT_TRUE(strings_->IsNull(i));
+    } else {
+      int32_t len = -1;
+      const uint8_t* bytes = strings_->GetValue(i, &len);
+      ASSERT_EQ(0, std::memcmp(expected_[i].data(), bytes, len));
+    }
+  }
+  TestInitialized(*strings_);
+}
+
+TEST_F(TestBinaryArray, TestPaddingZeroed) { AssertZeroPadded(*strings_); }
+
 TEST_F(TestBinaryArray, TestGetString) {
   for (size_t i = 0; i < expected_.size(); ++i) {
     if (valid_bytes_[i] == 0) {
@@ -1227,7 +1419,7 @@ TEST_F(TestBinaryArray, TestEqualsEmptyStrings) {
   }
 
   std::shared_ptr<Array> left_arr;
-  ASSERT_OK(builder.Finish(&left_arr));
+  FinishAndCheckPadding(&builder, &left_arr);
 
   const BinaryArray& left = checked_cast<const BinaryArray&>(*left_arr);
   std::shared_ptr<Array> right =
@@ -1247,7 +1439,7 @@ class TestBinaryBuilder : public TestBuilder {
 
   void Done() {
     std::shared_ptr<Array> out;
-    EXPECT_OK(builder_->Finish(&out));
+    FinishAndCheckPadding(builder_.get(), &out);
 
     result_ = std::dynamic_pointer_cast<BinaryArray>(out);
     ASSERT_OK(ValidateArray(*result_));
@@ -1329,7 +1521,9 @@ TEST_F(TestBinaryBuilder, TestCapacityReserve) {
   ASSERT_EQ(reps * N, result_->length());
   ASSERT_EQ(0, result_->null_count());
   ASSERT_EQ(reps * 40, result_->value_data()->size());
-  ASSERT_EQ(expected_capacity, result_->value_data()->capacity());
+
+  // Capacity is shrunk after `Finish`
+  ASSERT_EQ(640, result_->value_data()->capacity());
 }
 
 TEST_F(TestBinaryBuilder, TestZeroLength) {
@@ -1364,7 +1558,7 @@ void CheckSliceEquality() {
   }
 
   std::shared_ptr<Array> array;
-  ASSERT_OK(builder.Finish(&array));
+  FinishAndCheckPadding(&builder, &array);
 
   std::shared_ptr<Array> slice, slice2;
 
@@ -1416,10 +1610,10 @@ TEST_F(TestFWBinaryArray, Builder) {
   int64_t nbytes = length * byte_width;
 
   vector<uint8_t> data(nbytes);
-  test::random_bytes(nbytes, 0, data.data());
+  random_bytes(nbytes, 0, data.data());
 
   vector<uint8_t> is_valid(length);
-  test::random_null_bytes(length, 0.1, is_valid.data());
+  random_null_bytes(length, 0.1, is_valid.data());
 
   const uint8_t* raw_data = data.data();
 
@@ -1451,7 +1645,7 @@ TEST_F(TestFWBinaryArray, Builder) {
     }
   }
 
-  ASSERT_OK(builder_->Finish(&result));
+  FinishAndCheckPadding(builder_.get(), &result);
   CheckResult(*result);
 
   // Build using batch API
@@ -1462,7 +1656,8 @@ TEST_F(TestFWBinaryArray, Builder) {
   ASSERT_OK(builder_->AppendValues(raw_data, 50, raw_is_valid));
   ASSERT_OK(
       builder_->AppendValues(raw_data + 50 * byte_width, length - 50, raw_is_valid + 50));
-  ASSERT_OK(builder_->Finish(&result));
+  FinishAndCheckPadding(builder_.get(), &result);
+
   CheckResult(*result);
 
   // Build from std::string
@@ -1531,6 +1726,20 @@ TEST_F(TestFWBinaryArray, ZeroSize) {
   ASSERT_EQ(3, array->null_count());
 }
 
+TEST_F(TestFWBinaryArray, ZeroPadding) {
+  auto type = fixed_size_binary(4);
+  FixedSizeBinaryBuilder builder(type);
+
+  ASSERT_OK(builder.Append("foo1"));
+  ASSERT_OK(builder.AppendNull());
+  ASSERT_OK(builder.Append("foo2"));
+  ASSERT_OK(builder.AppendNull());
+  ASSERT_OK(builder.Append("foo3"));
+
+  std::shared_ptr<Array> array;
+  FinishAndCheckPadding(&builder, &array);
+}
+
 TEST_F(TestFWBinaryArray, Slice) {
   auto type = fixed_size_binary(4);
   FixedSizeBinaryBuilder builder(type);
@@ -1581,7 +1790,7 @@ class TestAdaptiveIntBuilder : public TestBuilder {
     builder_ = std::make_shared<AdaptiveIntBuilder>(pool_);
   }
 
-  void Done() { EXPECT_OK(builder_->Finish(&result_)); }
+  void Done() { FinishAndCheckPadding(builder_.get(), &result_); }
 
  protected:
   std::shared_ptr<AdaptiveIntBuilder> builder_;
@@ -1702,6 +1911,38 @@ TEST_F(TestAdaptiveIntBuilder, TestAppendValues) {
   ASSERT_TRUE(expected_->Equals(result_));
 }
 
+TEST_F(TestAdaptiveIntBuilder, TestAssertZeroPadded) {
+  std::vector<int64_t> values(
+      {0, static_cast<int64_t>(std::numeric_limits<int32_t>::max()) + 1});
+  ASSERT_OK(builder_->AppendValues(values.data(), values.size()));
+  Done();
+}
+
+TEST_F(TestAdaptiveIntBuilder, TestAppendNull) {
+  int64_t size = 1000;
+  for (unsigned index = 0; index < size; ++index) {
+    ASSERT_OK(builder_->AppendNull());
+  }
+
+  Done();
+
+  for (unsigned index = 0; index < size; ++index) {
+    ASSERT_TRUE(result_->IsNull(index));
+  }
+}
+
+TEST_F(TestAdaptiveIntBuilder, TestAppendNulls) {
+  constexpr int64_t size = 10;
+  const uint8_t valid_bytes[size] = {1, 0, 1, 0, 1, 0, 1, 0, 1, 0};
+  ASSERT_OK(builder_->AppendNulls(valid_bytes, size));
+
+  Done();
+
+  for (unsigned index = 0; index < size; ++index) {
+    ASSERT_EQ(result_->IsValid(index), static_cast<bool>(valid_bytes[index]));
+  }
+}
+
 class TestAdaptiveUIntBuilder : public TestBuilder {
  public:
   void SetUp() {
@@ -1709,7 +1950,7 @@ class TestAdaptiveUIntBuilder : public TestBuilder {
     builder_ = std::make_shared<AdaptiveUIntBuilder>(pool_);
   }
 
-  void Done() { EXPECT_OK(builder_->Finish(&result_)); }
+  void Done() { FinishAndCheckPadding(builder_.get(), &result_); }
 
  protected:
   std::shared_ptr<AdaptiveUIntBuilder> builder_;
@@ -1795,6 +2036,38 @@ TEST_F(TestAdaptiveUIntBuilder, TestAppendValues) {
 
   ArrayFromVector<UInt64Type, uint64_t>(expected_values, &expected_);
   ASSERT_TRUE(expected_->Equals(result_));
+}
+
+TEST_F(TestAdaptiveUIntBuilder, TestAssertZeroPadded) {
+  std::vector<uint64_t> values(
+      {0, static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) + 1});
+  ASSERT_OK(builder_->AppendValues(values.data(), values.size()));
+  Done();
+}
+
+TEST_F(TestAdaptiveUIntBuilder, TestAppendNull) {
+  int64_t size = 1000;
+  for (unsigned index = 0; index < size; ++index) {
+    ASSERT_OK(builder_->AppendNull());
+  }
+
+  Done();
+
+  for (unsigned index = 0; index < size; ++index) {
+    ASSERT_TRUE(result_->IsNull(index));
+  }
+}
+
+TEST_F(TestAdaptiveUIntBuilder, TestAppendNulls) {
+  constexpr int64_t size = 10;
+  const uint8_t valid_bytes[size] = {1, 0, 1, 0, 1, 0, 1, 0, 1, 0};
+  ASSERT_OK(builder_->AppendNulls(valid_bytes, size));
+
+  Done();
+
+  for (unsigned index = 0; index < size; ++index) {
+    ASSERT_EQ(result_->IsValid(index), static_cast<bool>(valid_bytes[index]));
+  }
 }
 
 // ----------------------------------------------------------------------
@@ -1894,7 +2167,7 @@ TYPED_TEST(TestDictionaryBuilder, DoubleTableSize) {
 
     // Finalize result
     std::shared_ptr<Array> result;
-    ASSERT_OK(builder.Finish(&result));
+    FinishAndCheckPadding(&builder, &result);
 
     // Finalize expected data
     std::shared_ptr<Array> dict_array;
@@ -1916,7 +2189,7 @@ TYPED_TEST(TestDictionaryBuilder, DeltaDictionary) {
   ASSERT_OK(builder.Append(static_cast<typename TypeParam::c_type>(1)));
   ASSERT_OK(builder.Append(static_cast<typename TypeParam::c_type>(2)));
   std::shared_ptr<Array> result;
-  ASSERT_OK(builder.Finish(&result));
+  FinishAndCheckPadding(&builder, &result);
 
   // Build expected data for the initial dictionary
   NumericBuilder<TypeParam> dict_builder1;
@@ -1975,7 +2248,7 @@ TYPED_TEST(TestDictionaryBuilder, DoubleDeltaDictionary) {
   ASSERT_OK(builder.Append(static_cast<typename TypeParam::c_type>(1)));
   ASSERT_OK(builder.Append(static_cast<typename TypeParam::c_type>(2)));
   std::shared_ptr<Array> result;
-  ASSERT_OK(builder.Finish(&result));
+  FinishAndCheckPadding(&builder, &result);
 
   // Build expected data for the initial dictionary
   NumericBuilder<TypeParam> dict_builder1;
@@ -2108,7 +2381,7 @@ TEST(TestStringDictionaryBuilder, DoubleTableSize) {
 
   // Finalize result
   std::shared_ptr<Array> result;
-  ASSERT_OK(builder.Finish(&result));
+  FinishAndCheckPadding(&builder, &result);
 
   // Finalize expected data
   std::shared_ptr<Array> str_array;
@@ -2155,7 +2428,7 @@ TEST(TestStringDictionaryBuilder, DeltaDictionary) {
   ASSERT_OK(builder.Append("test2"));
 
   std::shared_ptr<Array> result_delta;
-  ASSERT_OK(builder.Finish(&result_delta));
+  FinishAndCheckPadding(&builder, &result_delta);
 
   // Build expected data
   StringBuilder str_builder2;
@@ -2192,7 +2465,7 @@ TEST(TestStringDictionaryBuilder, BigDeltaDictionary) {
   }
 
   std::shared_ptr<Array> result;
-  ASSERT_OK(builder.Finish(&result));
+  FinishAndCheckPadding(&builder, &result);
 
   std::shared_ptr<Array> str_array1;
   ASSERT_OK(str_builder1.Finish(&str_array1));
@@ -2272,7 +2545,7 @@ TEST(TestFixedSizeBinaryDictionaryBuilder, Basic) {
   ASSERT_OK(builder.Append(test.data()));
 
   std::shared_ptr<Array> result;
-  ASSERT_OK(builder.Finish(&result));
+  FinishAndCheckPadding(&builder, &result);
 
   // Build expected data
   FixedSizeBinaryBuilder fsb_builder(arrow::fixed_size_binary(4));
@@ -2306,7 +2579,7 @@ TEST(TestFixedSizeBinaryDictionaryBuilder, DeltaDictionary) {
   ASSERT_OK(builder.Append(test.data()));
 
   std::shared_ptr<Array> result1;
-  ASSERT_OK(builder.Finish(&result1));
+  FinishAndCheckPadding(&builder, &result1);
 
   // Build expected data
   FixedSizeBinaryBuilder fsb_builder1(arrow::fixed_size_binary(4));
@@ -2332,7 +2605,7 @@ TEST(TestFixedSizeBinaryDictionaryBuilder, DeltaDictionary) {
   ASSERT_OK(builder.Append(test3.data()));
 
   std::shared_ptr<Array> result2;
-  ASSERT_OK(builder.Finish(&result2));
+  FinishAndCheckPadding(&builder, &result2);
 
   // Build expected data
   FixedSizeBinaryBuilder fsb_builder2(arrow::fixed_size_binary(4));
@@ -2509,7 +2782,7 @@ class TestListArray : public TestBuilder {
 
   void Done() {
     std::shared_ptr<Array> out;
-    EXPECT_OK(builder_->Finish(&out));
+    FinishAndCheckPadding(builder_.get(), &out);
     result_ = std::dynamic_pointer_cast<ListArray>(out);
   }
 
@@ -2612,19 +2885,19 @@ TEST_F(TestListArray, TestFromArrays) {
 
   ListArray expected1(list_type, length, offsets1->data()->buffers[1], values,
                       offsets1->data()->buffers[0], 0);
-  test::AssertArraysEqual(expected1, *list1);
+  AssertArraysEqual(expected1, *list1);
 
   // Use null bitmap from offsets3, but clean offsets from non-null version
   ListArray expected3(list_type, length, offsets1->data()->buffers[1], values,
                       offsets3->data()->buffers[0], 1);
-  test::AssertArraysEqual(expected3, *list3);
+  AssertArraysEqual(expected3, *list3);
 
   // Check that the last offset bit is zero
-  ASSERT_TRUE(BitUtil::BitNotSet(list3->null_bitmap()->data(), length + 1));
+  ASSERT_FALSE(BitUtil::GetBit(list3->null_bitmap()->data(), length + 1));
 
   ListArray expected4(list_type, length, offsets2->data()->buffers[1], values,
                       offsets4->data()->buffers[0], 1);
-  test::AssertArraysEqual(expected4, *list4);
+  AssertArraysEqual(expected4, *list4);
 
   // Test failure modes
 
@@ -2654,6 +2927,8 @@ TEST_F(TestListArray, TestAppendNull) {
 
   auto values = result_->values();
   ASSERT_EQ(0, values->length());
+  // Values buffer should be non-null
+  ASSERT_NE(nullptr, values->data()->buffers[1]);
 }
 
 void ValidateBasicListArray(const ListArray* result, const vector<int32_t>& values,
@@ -2965,7 +3240,7 @@ class TestStructBuilder : public TestBuilder {
 
   void Done() {
     std::shared_ptr<Array> out;
-    ASSERT_OK(builder_->Finish(&out));
+    FinishAndCheckPadding(builder_.get(), &out);
     result_ = std::dynamic_pointer_cast<StructArray>(out);
   }
 
@@ -3146,7 +3421,7 @@ TEST_F(TestStructBuilder, TestEquality) {
     int_vb->UnsafeAppend(value);
   }
 
-  ASSERT_OK(builder_->Finish(&array));
+  FinishAndCheckPadding(builder_.get(), &array);
 
   ASSERT_OK(builder_->Resize(list_lengths.size()));
   ASSERT_OK(char_vb->Resize(list_values.size()));
@@ -3273,7 +3548,7 @@ TEST_F(TestStructBuilder, TestSlice) {
   for (int32_t value : int_values) {
     int_vb->UnsafeAppend(value);
   }
-  ASSERT_OK(builder_->Finish(&array));
+  FinishAndCheckPadding(builder_.get(), &array);
 
   std::shared_ptr<StructArray> slice, slice2;
   std::shared_ptr<Int32Array> int_field;
@@ -3348,6 +3623,9 @@ TEST(TestUnionArrayAdHoc, TestSliceEquals) {
 
     ASSERT_TRUE(slice->Equals(slice2));
     ASSERT_TRUE(array->RangeEquals(1, 6, 0, slice));
+
+    AssertZeroPadded(*array);
+    TestInitialized(*array);
   };
 
   CheckUnion(batch->column(1));
@@ -3392,7 +3670,7 @@ class DecimalTest : public ::testing::TestWithParam<int> {
     }
 
     std::shared_ptr<Array> out;
-    ASSERT_OK(builder->Finish(&out));
+    FinishAndCheckPadding(builder.get(), &out);
 
     std::vector<uint8_t> raw_bytes;
 
@@ -3404,14 +3682,13 @@ class DecimalTest : public ::testing::TestWithParam<int> {
     ASSERT_OK(
         BitUtil::BytesToBits(valid_bytes, default_memory_pool(), &expected_null_bitmap));
 
-    int64_t expected_null_count = test::null_count(valid_bytes);
+    int64_t expected_null_count = CountNulls(valid_bytes);
     auto expected = std::make_shared<Decimal128Array>(
         type, size, expected_data, expected_null_bitmap, expected_null_count);
 
     std::shared_ptr<Array> lhs = out->Slice(offset);
     std::shared_ptr<Array> rhs = expected->Slice(offset);
-    bool result = lhs->Equals(rhs);
-    ASSERT_TRUE(result);
+    ASSERT_TRUE(lhs->Equals(rhs));
   }
 };
 
@@ -3461,6 +3738,13 @@ TEST(TestRechunkArraysConsistently, Trivial) {
   groups = {{a1, a2}, {}, {b1}};
   rechunked = internal::RechunkArraysConsistently(groups);
   ASSERT_EQ(rechunked.size(), 3);
+
+  for (auto& arrvec : rechunked) {
+    for (auto& arr : arrvec) {
+      AssertZeroPadded(*arr);
+      TestInitialized(*arr);
+    }
+  }
 }
 
 TEST(TestRechunkArraysConsistently, Plain) {
@@ -3507,6 +3791,13 @@ TEST(TestRechunkArraysConsistently, Plain) {
   ASSERT_ARRAYS_EQUAL(*rb[3], *expected);
   ArrayFromVector<Int32Type, int32_t>({48, 49}, &expected);
   ASSERT_ARRAYS_EQUAL(*rb[4], *expected);
+
+  for (auto& arrvec : rechunked) {
+    for (auto& arr : arrvec) {
+      AssertZeroPadded(*arr);
+      TestInitialized(*arr);
+    }
+  }
 }
 
 }  // namespace arrow

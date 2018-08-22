@@ -365,7 +365,14 @@ def dataframe_to_arrays(df, schema, preserve_index, nthreads=1, columns=None):
             nthreads = 1
 
     def convert_column(col, ty):
-        return pa.array(col, from_pandas=True, type=ty)
+        try:
+            return pa.array(col, from_pandas=True, type=ty)
+        except (pa.ArrowInvalid,
+                pa.ArrowNotImplementedError,
+                pa.ArrowTypeError) as e:
+            e.args += ("Conversion failed for column {0!s} with type {1!s}"
+                       .format(col.name, col.dtype),)
+            raise e
 
     if nthreads == 1:
         arrays = [convert_column(c, t)

@@ -30,6 +30,7 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 #
+import glob
 import os
 import sys
 
@@ -65,6 +66,9 @@ extensions = [
 autodoc_default_flags = ['members', 'undoc-members', 'show-inheritance',
                          'inherited-members']
 
+# ipython directive options
+ipython_mplbackend = ''
+
 # numpydoc configuration
 napoleon_use_rtype = False
 
@@ -77,7 +81,6 @@ templates_path = ['_templates']
 # source_suffix = ['.rst', '.md']
 source_suffix = '.rst'
 
-import glob
 autosummary_generate = glob.glob("*.rst")
 
 # The encoding of source files.
@@ -187,8 +190,8 @@ html_theme_path = sphinx_bootstrap_theme.get_html_theme_path()
 # html_logo = None
 
 # The name of an image file (relative to this directory) to use as a favicon of
-# the docs.  This file should be a Windows icon file (.ico) being 16x16 or 32x32
-# pixels large.
+# the docs.  This file should be a Windows icon file (.ico) being 16x16 or
+# 32x32 pixels large.
 #
 # html_favicon = None
 

@@ -24,13 +24,13 @@
 
 Name:		@PACKAGE@
 Version:	@VERSION@
-Release:	1%{?dist}
+Release:	@RELEASE@%{?dist}
 Summary:	Apache Arrow is a data processing library for analysis
 
 Group:		Development/Libraries
 License:	Apache-2.0
 URL:		https://arrow.apache.org/
-Source0:	https://dist.apache.org/repos/dist/release/arrow/arrow-%{version}/apache-@PACKAGE@-%{version}.tar.gz
+Source0:	https://dist.apache.org/repos/dist/release/@PACKAGE@/@PACKAGE@-%{version}/apache-@PACKAGE@-%{version}.tar.gz
 
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-%(%{__id_u} -n)
 BuildRequires:	pkgconfig
@@ -44,6 +44,7 @@ BuildRequires:	python34-devel
 BuildRequires:	python34-numpy
 %endif
 %if %{use_glib}
+BuildRequires:	autoconf-archive
 BuildRequires:	gtk-doc
 BuildRequires:	gobject-introspection-devel
 %endif
@@ -60,7 +61,6 @@ mkdir cpp/build
 cd cpp/build
 %cmake3 .. \
   -DCMAKE_BUILD_TYPE=$build_type \
-  -DARROW_ORC=ON \
 %if %{use_python}
   -DARROW_PYTHON=ON \
   -DPythonInterp_FIND_VERSION=ON \
@@ -76,9 +76,11 @@ cd -
 
 %if %{use_glib}
 cd c_glib
+./autogen.sh
 %configure \
   --with-arrow-cpp-build-dir=$PWD/../cpp/build \
-  --with-arrow-cpp-build-type=$build_type
+  --with-arrow-cpp-build-type=$build_type \
+  --enable-gtk-doc
 sed -i 's|^hardcode_libdir_flag_spec=.*|hardcode_libdir_flag_spec=""|g' libtool
 sed -i 's|^runpath_var=LD_RUN_PATH|runpath_var=DIE_RPATH_DIE|g' libtool
 LD_LIBRARY_PATH=$PWD/arrow-glib/.libs/:$PWD/../cpp/build/$build_type \
@@ -132,6 +134,7 @@ Libraries and header files for Apache Arrow C++.
 %{_libdir}/libarrow.so
 %{_libdir}/pkgconfig/arrow.pc
 %{_libdir}/pkgconfig/arrow-compute.pc
+%{_libdir}/pkgconfig/arrow-orc.pc
 
 %if %{use_python}
 %package python-libs
@@ -204,6 +207,7 @@ Libraries and header files for Apache Arrow GLib.
 %{_libdir}/libarrow-glib.a
 %{_libdir}/libarrow-glib.so
 %{_libdir}/pkgconfig/arrow-glib.pc
+%{_libdir}/pkgconfig/arrow-orc-glib.pc
 %{_libdir}/girepository-1.0/*.typelib
 %{_datadir}/arrow-glib/example/
 
@@ -225,6 +229,9 @@ Documentation for Apache Arrow GLib.
 %endif
 
 %changelog
+* Thu Aug 02 2018 Phillip Cloud <cpcloud@gmail.com> - 0.10.0-1
+- New upstream release.
+
 * Fri Mar 16 2018 Kouhei Sutou <kou@clear-code.com> - 0.9.0-1
 - New upstream release.
 

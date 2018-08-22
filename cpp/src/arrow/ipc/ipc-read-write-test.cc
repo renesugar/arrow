@@ -351,7 +351,7 @@ TEST_F(TestWriteRecordBatch, SliceTruncatesBuffers) {
   auto union_type = union_({field("f0", a0->type())}, {0});
   std::vector<int32_t> type_ids(a0->length());
   std::shared_ptr<Buffer> ids_buffer;
-  ASSERT_OK(test::CopyBufferFromVector(type_ids, default_memory_pool(), &ids_buffer));
+  ASSERT_OK(CopyBufferFromVector(type_ids, default_memory_pool(), &ids_buffer));
   a1 =
       std::make_shared<UnionArray>(union_type, a0->length(), struct_children, ids_buffer);
   CheckArray(a1);
@@ -363,8 +363,7 @@ TEST_F(TestWriteRecordBatch, SliceTruncatesBuffers) {
     type_offsets.push_back(i);
   }
   std::shared_ptr<Buffer> offsets_buffer;
-  ASSERT_OK(
-      test::CopyBufferFromVector(type_offsets, default_memory_pool(), &offsets_buffer));
+  ASSERT_OK(CopyBufferFromVector(type_offsets, default_memory_pool(), &offsets_buffer));
   a1 = std::make_shared<UnionArray>(dense_union_type, a0->length(), struct_children,
                                     ids_buffer, offsets_buffer);
   CheckArray(a1);
@@ -498,8 +497,11 @@ TEST_F(RecursionLimits, StressLimit) {
   CheckDepth(100, &it_works);
   ASSERT_TRUE(it_works);
 
+// Mitigate Valgrind's slowness
+#if !defined(ARROW_VALGRIND)
   CheckDepth(500, &it_works);
   ASSERT_TRUE(it_works);
+#endif
 }
 #endif  // !defined(_WIN32) || defined(NDEBUG)
 
@@ -507,7 +509,7 @@ class TestFileFormat : public ::testing::TestWithParam<MakeRecordBatch*> {
  public:
   void SetUp() {
     pool_ = default_memory_pool();
-    buffer_ = std::make_shared<PoolBuffer>(pool_);
+    ASSERT_OK(AllocateResizableBuffer(pool_, 0, &buffer_));
     sink_.reset(new io::BufferOutputStream(buffer_));
   }
   void TearDown() {}
@@ -549,7 +551,7 @@ class TestFileFormat : public ::testing::TestWithParam<MakeRecordBatch*> {
   MemoryPool* pool_;
 
   std::unique_ptr<io::BufferOutputStream> sink_;
-  std::shared_ptr<PoolBuffer> buffer_;
+  std::shared_ptr<ResizableBuffer> buffer_;
 };
 
 TEST_P(TestFileFormat, RoundTrip) {
@@ -573,7 +575,7 @@ class TestStreamFormat : public ::testing::TestWithParam<MakeRecordBatch*> {
  public:
   void SetUp() {
     pool_ = default_memory_pool();
-    buffer_ = std::make_shared<PoolBuffer>(pool_);
+    ASSERT_OK(AllocateResizableBuffer(pool_, 0, &buffer_));
     sink_.reset(new io::BufferOutputStream(buffer_));
   }
   void TearDown() {}
@@ -611,7 +613,7 @@ class TestStreamFormat : public ::testing::TestWithParam<MakeRecordBatch*> {
   MemoryPool* pool_;
 
   std::unique_ptr<io::BufferOutputStream> sink_;
-  std::shared_ptr<PoolBuffer> buffer_;
+  std::shared_ptr<ResizableBuffer> buffer_;
 };
 
 TEST_P(TestStreamFormat, RoundTrip) {
@@ -745,9 +747,9 @@ TEST_F(TestTensorRoundTrip, BasicRoundtrip) {
   int64_t size = 24;
 
   std::vector<int64_t> values;
-  test::randint(size, 0, 100, &values);
+  randint(size, 0, 100, &values);
 
-  auto data = test::GetBufferFromVector(values);
+  auto data = GetBufferFromVector(values);
 
   Tensor t0(int64(), data, shape, strides, dim_names);
   Tensor tzero(int64(), data, {}, {}, {});
@@ -766,9 +768,9 @@ TEST_F(TestTensorRoundTrip, NonContiguous) {
   ASSERT_OK(io::MemoryMapFixture::InitMemoryMap(kBufferSize, path, &mmap_));
 
   std::vector<int64_t> values;
-  test::randint(24, 0, 100, &values);
+  randint(24, 0, 100, &values);
 
-  auto data = test::GetBufferFromVector(values);
+  auto data = GetBufferFromVector(values);
   Tensor tensor(int64(), data, {4, 3}, {48, 16});
 
   CheckTensorRoundTrip(tensor);

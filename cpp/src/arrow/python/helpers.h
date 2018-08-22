@@ -74,7 +74,7 @@ inline bool IsPyInteger(PyObject* obj) {
 // \brief Use pandas missing value semantics to check if a value is null
 bool PandasObjectIsNull(PyObject* obj);
 
-// \brief Check whether obj is nan
+// \brief Check whether obj is a floating-point NaN
 bool PyFloat_IsNaN(PyObject* obj);
 
 inline bool IsPyBinary(PyObject* obj) {
@@ -111,11 +111,12 @@ inline Status CastSize(Py_ssize_t size, int32_t* out,
   return Status::OK();
 }
 
-Status BuilderAppend(StringBuilder* builder, PyObject* obj, bool check_valid = false,
-                     bool* is_full = nullptr);
-Status BuilderAppend(BinaryBuilder* builder, PyObject* obj, bool* is_full = nullptr);
-Status BuilderAppend(FixedSizeBinaryBuilder* builder, PyObject* obj,
-                     bool* is_full = nullptr);
+// \brief Print the Python object's __str__ form along with the passed error
+// message
+Status InvalidValue(PyObject* obj, const std::string& why);
+
+Status IntegerScalarToDoubleSafe(PyObject* obj, double* result);
+Status IntegerScalarToFloat32Safe(PyObject* obj, float* result);
 
 }  // namespace internal
 }  // namespace py

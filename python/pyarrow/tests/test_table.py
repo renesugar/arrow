@@ -15,13 +15,54 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from collections import OrderedDict
+from collections import OrderedDict, Iterable
+import pickle
+
 import numpy as np
 from pandas.util.testing import assert_frame_equal
 import pandas as pd
 import pytest
 
 import pyarrow as pa
+
+
+def test_chunked_array_basics():
+    data = pa.chunked_array([], type=pa.string())
+    assert data.type == pa.string()
+    assert data.to_pylist() == []
+
+    with pytest.raises(ValueError):
+        pa.chunked_array([])
+
+    data = pa.chunked_array([
+        [1, 2, 3],
+        [4, 5, 6],
+        [7, 8, 9]
+    ])
+    assert isinstance(data.chunks, list)
+    assert all(isinstance(c, pa.lib.Int64Array) for c in data.chunks)
+    assert all(isinstance(c, pa.lib.Int64Array) for c in data.iterchunks())
+    assert len(data.chunks) == 3
+
+
+def test_chunked_array_str():
+    data = [
+        pa.array([1, 2, 3]),
+        pa.array([4, 5, 6])
+    ]
+    data = pa.chunked_array(data)
+    assert str(data) == """[
+  [
+    1,
+    2,
+    3
+  ],
+  [
+    4,
+    5,
+    6
+  ]
+]"""
 
 
 def test_chunked_array_getitem():
@@ -47,6 +88,129 @@ def test_chunked_array_getitem():
     data_slice = data[99:99]
     assert data_slice.type == data.type
     assert data_slice.to_pylist() == []
+
+
+def test_chunked_array_iter():
+    data = [
+        pa.array([0]),
+        pa.array([1, 2, 3]),
+        pa.array([4, 5, 6]),
+        pa.array([7, 8, 9])
+    ]
+    arr = pa.chunked_array(data)
+
+    for i, j in zip(range(10), arr):
+        assert i == j
+
+    assert isinstance(arr, Iterable)
+
+
+def test_chunked_array_equals():
+    def eq(xarrs, yarrs):
+        if isinstance(xarrs, pa.ChunkedArray):
+            x = xarrs
+        else:
+            x = pa.chunked_array(xarrs)
+        if isinstance(yarrs, pa.ChunkedArray):
+            y = yarrs
+        else:
+            y = pa.chunked_array(yarrs)
+        assert x.equals(y)
+        assert y.equals(x)
+
+    def ne(xarrs, yarrs):
+        if isinstance(xarrs, pa.ChunkedArray):
+            x = xarrs
+        else:
+            x = pa.chunked_array(xarrs)
+        if isinstance(yarrs, pa.ChunkedArray):
+            y = yarrs
+        else:
+            y = pa.chunked_array(yarrs)
+        assert not x.equals(y)
+        assert not y.equals(x)
+
+    eq(pa.chunked_array([], type=pa.int32()),
+       pa.chunked_array([], type=pa.int32()))
+    ne(pa.chunked_array([], type=pa.int32()),
+       pa.chunked_array([], type=pa.int64()))
+
+    a = pa.array([0, 2], type=pa.int32())
+    b = pa.array([0, 2], type=pa.int64())
+    c = pa.array([0, 3], type=pa.int32())
+    d = pa.array([0, 2, 0, 3], type=pa.int32())
+
+    eq([a], [a])
+    ne([a], [b])
+    eq([a, c], [a, c])
+    eq([a, c], [d])
+    ne([c, a], [a, c])
+
+
+@pytest.mark.parametrize(
+    ('data', 'typ'),
+    [
+        ([True, False, True, True], pa.bool_()),
+        ([1, 2, 4, 6], pa.int64()),
+        ([1.0, 2.5, None], pa.float64()),
+        (['a', None, 'b'], pa.string()),
+        ([], pa.list_(pa.uint8())),
+        ([[1, 2], [3]], pa.list_(pa.int64())),
+        ([['a'], None, ['b', 'c']], pa.list_(pa.string())),
+        ([(1, 'a'), (2, 'c'), None],
+            pa.struct([pa.field('a', pa.int64()), pa.field('b', pa.string())]))
+    ]
+)
+def test_chunked_array_pickle(data, typ):
+    arrays = []
+    while data:
+        arrays.append(pa.array(data[:2], type=typ))
+        data = data[2:]
+    array = pa.chunked_array(arrays, type=typ)
+    result = pickle.loads(pickle.dumps(array))
+    assert result.equals(array)
+
+
+def test_chunked_array_to_pandas():
+    data = [
+        pa.array([-10, -5, 0, 5, 10])
+    ]
+    table = pa.Table.from_arrays(data, names=['a'])
+    chunked_arr = table.column(0).data
+    assert isinstance(chunked_arr, pa.ChunkedArray)
+    array = chunked_arr.to_pandas()
+    assert array.shape == (5,)
+    assert array[0] == -10
+
+
+def test_chunked_array_asarray():
+    data = [
+        pa.array([0]),
+        pa.array([1, 2, 3])
+    ]
+    chunked_arr = pa.chunked_array(data)
+
+    np_arr = np.asarray(chunked_arr)
+    assert np_arr.tolist() == [0, 1, 2, 3]
+    assert np_arr.dtype == np.dtype('int64')
+
+    # An optional type can be specified when calling np.asarray
+    np_arr = np.asarray(chunked_arr, dtype='str')
+    assert np_arr.tolist() == ['0', '1', '2', '3']
+
+    # Types are modified when there are nulls
+    data = [
+        pa.array([1, None]),
+        pa.array([1, 2, 3])
+    ]
+    chunked_arr = pa.chunked_array(data)
+
+    np_arr = np.asarray(chunked_arr)
+    elements = np_arr.tolist()
+    assert elements[0] == 1.
+    assert np.isnan(elements[1])
+    assert elements[2:] == [1., 2., 3.]
+    assert np_arr.dtype == np.dtype('float64')
 
 
 def test_column_basics():
@@ -85,6 +249,17 @@ def test_column_factory_function():
         pa.Column.from_array(pa.field('foo', pa.string()), arr)
 
 
+def test_column_pickle():
+    arr = pa.chunked_array([[1, 2], [5, 6, 7]], type=pa.int16())
+    field = pa.field("ints", pa.int16()).add_metadata({b"foo": b"bar"})
+    col = pa.column(field, arr)
+
+    result = pickle.loads(pickle.dumps(col))
+    assert result.equals(col)
+    assert result.data.num_chunks == 2
+    assert result.field == field
+
+
 def test_column_to_pandas():
     data = [
         pa.array([-10, -5, 0, 5, 10])
@@ -95,6 +270,22 @@ def test_column_to_pandas():
     assert series.name == 'a'
     assert series.shape == (5,)
     assert series.iloc[0] == -10
+
+
+def test_column_asarray():
+    data = [
+        pa.array([-10, -5, 0, 5, 10])
+    ]
+    table = pa.Table.from_arrays(data, names=['a'])
+    column = table.column(0)
+
+    np_arr = np.asarray(column)
+    assert np_arr.tolist() == [-10, -5, 0, 5, 10]
+    assert np_arr.dtype == np.dtype('int64')
+
+    # An optional type can be specified when calling np.asarray
+    np_arr = np.asarray(column, dtype='str')
+    assert np_arr.tolist() == ['-10', '-5', '0', '5', '10']
 
 
 def test_column_flatten():
@@ -121,8 +312,7 @@ def test_recordbatch_basics():
     ]
 
     batch = pa.RecordBatch.from_arrays(data, ['c0', 'c1'])
-
-    batch.schema.metadata
+    assert not batch.schema.metadata
 
     assert len(batch) == 5
     assert batch.num_rows == 5
@@ -135,6 +325,22 @@ def test_recordbatch_basics():
     with pytest.raises(IndexError):
         # bounds checking
         batch[2]
+
+    # Schema passed explicitly
+    schema = pa.schema([pa.field('c0', pa.int16()),
+                        pa.field('c1', pa.int32())],
+                       metadata={b'foo': b'bar'})
+    batch = pa.RecordBatch.from_arrays(data, schema)
+    assert batch.schema == schema
+
+
+def test_recordbatch_from_arrays_validate_lengths():
+    # ARROW-2820
+    data = [pa.array([1]), pa.array(["tokyo", "like", "happy"]),
+            pa.array(["derek"])]
+
+    with pytest.raises(ValueError):
+        pa.RecordBatch.from_arrays(data, ['id', 'tags', 'name'])
 
 
 def test_recordbatch_no_fields():
@@ -165,6 +371,21 @@ def test_recordbatch_empty_metadata():
 
     batch = pa.RecordBatch.from_arrays(data, ['c0', 'c1'])
     assert batch.schema.metadata is None
+
+
+def test_recordbatch_pickle():
+    data = [
+        pa.array(range(5)),
+        pa.array([-10, -5, 0, 5, 10])
+    ]
+    schema = pa.schema([pa.field('ints', pa.int8()),
+                        pa.field('floats', pa.float32()),
+                        ]).add_metadata({b'foo': b'bar'})
+    batch = pa.RecordBatch.from_arrays(data, schema)
+
+    result = pickle.loads(pickle.dumps(batch))
+    assert result.equals(batch)
+    assert result.schema == schema
 
 
 def test_recordbatch_slice_getitem():
@@ -279,6 +500,9 @@ def test_table_to_batches():
     assert_frame_equal(pa.Table.from_batches(batches).to_pandas(),
                        expected_df)
 
+    table_from_iter = pa.Table.from_batches(iter([batch1, batch2, batch1]))
+    assert table.equals(table_from_iter)
+
 
 def test_table_basics():
     data = [
@@ -296,7 +520,9 @@ def test_table_basics():
         ('b', [-10, -5, 0, 5, 10])
     ])
 
+    columns = []
     for col in table.itercolumns():
+        columns.append(col)
         for chunk in col.data.iterchunks():
             assert chunk is not None
 
@@ -305,6 +531,8 @@ def test_table_basics():
 
         with pytest.raises(IndexError):
             col.data.chunk(col.data.num_chunks)
+
+    assert table.columns == columns
 
 
 def test_table_from_arrays_invalid_names():
@@ -317,6 +545,21 @@ def test_table_from_arrays_invalid_names():
 
     with pytest.raises(ValueError):
         pa.Table.from_arrays(data, names=['a'])
+
+
+def test_table_pickle():
+    data = [
+        pa.chunked_array([[1, 2], [3, 4]], type=pa.uint32()),
+        pa.chunked_array([["some", "strings", None, ""]], type=pa.string()),
+    ]
+    schema = pa.schema([pa.field('ints', pa.uint32()),
+                        pa.field('strs', pa.string())],
+                       metadata={b'foo': b'bar'})
+    table = pa.Table.from_arrays(data, schema=schema)
+
+    result = pickle.loads(pickle.dumps(table))
+    result._validate()
+    assert result.equals(table)
 
 
 def test_table_select_column():
@@ -357,6 +600,24 @@ def test_table_add_column():
     expected = pa.Table.from_arrays([data[1]] + data,
                                     names=('d', 'a', 'b', 'c'))
     assert t4.equals(expected)
+
+
+def test_table_set_column():
+    data = [
+        pa.array(range(5)),
+        pa.array([-10, -5, 0, 5, 10]),
+        pa.array(range(5, 10))
+    ]
+    table = pa.Table.from_arrays(data, names=('a', 'b', 'c'))
+
+    col = pa.Column.from_array('d', data[1])
+    t2 = table.set_column(0, col)
+
+    expected_data = list(data)
+    expected_data[0] = data[1]
+    expected = pa.Table.from_arrays(expected_data,
+                                    names=('d', 'b', 'c'))
+    assert t2.equals(expected)
 
 
 def test_table_drop():
@@ -471,17 +732,3 @@ def test_table_negative_indexing():
 
     with pytest.raises(IndexError):
         table[4]
-
-
-def test_table_ctor_errors():
-    with pytest.raises(ReferenceError):
-        repr(pa.Table())
-    with pytest.raises(ReferenceError):
-        str(pa.Table())
-
-
-def test_schema_ctor_errors():
-    with pytest.raises(ReferenceError):
-        repr(pa.Schema())
-    with pytest.raises(ReferenceError):
-        str(pa.Schema())

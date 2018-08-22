@@ -45,13 +45,13 @@
 
 #include "arrow/compute/api.h"
 
-#include "arrow/python/builtin_convert.h"
 #include "arrow/python/common.h"
 #include "arrow/python/config.h"
 #include "arrow/python/decimal.h"
 #include "arrow/python/helpers.h"
 #include "arrow/python/numpy-internal.h"
 #include "arrow/python/numpy_convert.h"
+#include "arrow/python/python_to_arrow.h"
 #include "arrow/python/type_traits.h"
 #include "arrow/python/util/datetime.h"
 
@@ -1854,6 +1854,15 @@ Status ConvertArrayToPandas(PandasOptions options, const std::shared_ptr<Array>&
   static std::string dummy_name = "dummy";
   auto field = std::make_shared<Field>(dummy_name, arr->type());
   auto col = std::make_shared<Column>(field, arr);
+  return ConvertColumnToPandas(options, col, py_ref, out);
+}
+
+Status ConvertChunkedArrayToPandas(PandasOptions options,
+                                   const std::shared_ptr<ChunkedArray>& ca,
+                                   PyObject* py_ref, PyObject** out) {
+  static std::string dummy_name = "dummy";
+  auto field = std::make_shared<Field>(dummy_name, ca->type());
+  auto col = std::make_shared<Column>(field, ca);
   return ConvertColumnToPandas(options, col, py_ref, out);
 }
 

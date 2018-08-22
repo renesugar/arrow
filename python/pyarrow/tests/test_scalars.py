@@ -28,19 +28,8 @@ import pyarrow as pa
 class TestScalars(unittest.TestCase):
 
     def test_null_singleton(self):
-        with self.assertRaises(Exception):
+        with pytest.raises(Exception):
             pa.NAType()
-
-    def test_ctor_null_check(self):
-        # ARROW-1155
-        with pytest.raises(ReferenceError):
-            repr(pa.Int16Value())
-
-        with pytest.raises(ReferenceError):
-            str(pa.Int16Value())
-
-        with pytest.raises(ReferenceError):
-            repr(pa.StringValue())
 
     def test_bool(self):
         arr = pa.array([True, None, False, None])
@@ -48,6 +37,7 @@ class TestScalars(unittest.TestCase):
         v = arr[0]
         assert isinstance(v, pa.BooleanValue)
         assert repr(v) == "True"
+        assert str(v) == "True"
         assert v.as_py() is True
 
         assert arr[1] is pa.NA
@@ -58,6 +48,7 @@ class TestScalars(unittest.TestCase):
         v = arr[0]
         assert isinstance(v, pa.Int64Value)
         assert repr(v) == "1"
+        assert str(v) == "1"
         assert v.as_py() == 1
         assert v == 1
 
@@ -69,6 +60,7 @@ class TestScalars(unittest.TestCase):
         v = arr[0]
         assert isinstance(v, pa.DoubleValue)
         assert repr(v) == "1.5"
+        assert str(v) == "1.5"
         assert v.as_py() == 1.5
         assert v == 1.5
 
@@ -82,6 +74,7 @@ class TestScalars(unittest.TestCase):
         v = arr[0]
         assert isinstance(v, pa.HalfFloatValue)
         assert repr(v) == "1.5"
+        assert str(v) == "1.5"
         assert v.as_py() == 1.5
         assert v == 1.5
 
@@ -92,8 +85,10 @@ class TestScalars(unittest.TestCase):
 
         v = arr[0]
         assert isinstance(v, pa.StringValue)
-        assert v.as_py() == 'foo'
-        assert v == 'foo'
+        assert v.as_py() == u'foo'
+        assert repr(v) == repr(u"foo")
+        assert str(v) == str(u"foo")
+        assert v == u'foo'
         # Assert that newly created values are equal to the previously created
         # one.
         assert v == arr[0]
@@ -110,6 +105,8 @@ class TestScalars(unittest.TestCase):
         v = arr[0]
         assert isinstance(v, pa.BinaryValue)
         assert v.as_py() == b'foo'
+        assert str(v) == str(b"foo")
+        assert repr(v) == repr(b"foo")
         assert v == b'foo'
 
         assert arr[1] is pa.NA
@@ -157,14 +154,15 @@ class TestScalars(unittest.TestCase):
     def test_timestamp(self):
         arr = pd.date_range('2000-01-01 12:34:56', periods=10).values
 
-        units = ['s', 'ms', 'us', 'ns']
+        units = ['ns', 'us', 'ms', 's']
 
-        for unit in units:
+        for i, unit in enumerate(units):
             dtype = 'datetime64[{0}]'.format(unit)
             arrow_arr = pa.Array.from_pandas(arr.astype(dtype))
             expected = pd.Timestamp('2000-01-01 12:34:56')
 
             assert arrow_arr[0].as_py() == expected
+            assert arrow_arr[0].value * 1000**i == expected.value
 
             tz = 'America/New_York'
             arrow_type = pa.timestamp(unit, tz=tz)
@@ -177,6 +175,7 @@ class TestScalars(unittest.TestCase):
                         .tz_convert(tz))
 
             assert arrow_arr[0].as_py() == expected
+            assert arrow_arr[0].value * 1000**i == expected.value
 
     def test_dictionary(self):
         colors = ['red', 'green', 'blue']

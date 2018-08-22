@@ -66,6 +66,9 @@ bool ChunkedArray::Equals(const ChunkedArray& other) const {
   if (null_count_ != other.null_count()) {
     return false;
   }
+  if (length_ == 0) {
+    return type_->Equals(other.type_);
+  }
 
   // Check contents of the underlying arrays. This checks for equality of
   // the underlying data independently of the chunk size.
@@ -305,6 +308,24 @@ class SimpleTable : public Table {
     RETURN_NOT_OK(schema_->AddField(i, col->field(), &new_schema));
 
     *out = Table::Make(new_schema, internal::AddVectorElement(columns_, i, col));
+    return Status::OK();
+  }
+
+  Status SetColumn(int i, const std::shared_ptr<Column>& col,
+                   std::shared_ptr<Table>* out) const override {
+    DCHECK(col != nullptr);
+
+    if (col->length() != num_rows_) {
+      std::stringstream ss;
+      ss << "Added column's length must match table's length. Expected length "
+         << num_rows_ << " but got length " << col->length();
+      return Status::Invalid(ss.str());
+    }
+
+    std::shared_ptr<Schema> new_schema;
+    RETURN_NOT_OK(schema_->SetField(i, col->field(), &new_schema));
+
+    *out = Table::Make(new_schema, internal::ReplaceVectorElement(columns_, i, col));
     return Status::OK();
   }
 

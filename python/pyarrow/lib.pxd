@@ -297,7 +297,7 @@ cdef class ChunkedArray:
         CChunkedArray* chunked_array
 
     cdef void init(self, const shared_ptr[CChunkedArray]& chunked_array)
-    cdef int _check_nullptr(self) except -1
+    cdef getitem(self, int64_t i)
 
 
 cdef class Column:
@@ -306,7 +306,6 @@ cdef class Column:
         CColumn* column
 
     cdef void init(self, const shared_ptr[CColumn]& column)
-    cdef int _check_nullptr(self) except -1
 
 
 cdef class Table:
@@ -315,7 +314,6 @@ cdef class Table:
         CTable* table
 
     cdef void init(self, const shared_ptr[CTable]& table)
-    cdef int _check_nullptr(self) except -1
 
 
 cdef class RecordBatch:
@@ -325,7 +323,6 @@ cdef class RecordBatch:
         Schema _schema
 
     cdef void init(self, const shared_ptr[CRecordBatch]& table)
-    cdef int _check_nullptr(self) except -1
 
 
 cdef class Buffer:
@@ -335,7 +332,7 @@ cdef class Buffer:
         Py_ssize_t strides[1]
 
     cdef void init(self, const shared_ptr[CBuffer]& buffer)
-    cdef int _check_nullptr(self) except -1
+    cdef getitem(self, int64_t i)
 
 
 cdef class ResizableBuffer(Buffer):
@@ -360,7 +357,8 @@ cdef class NativeFile:
     cdef read_handle(self, shared_ptr[RandomAccessFile]* file)
     cdef write_handle(self, shared_ptr[OutputStream]* file)
 
-cdef get_reader(object source, shared_ptr[RandomAccessFile]* reader)
+cdef get_reader(object source, c_bool use_memory_map,
+                shared_ptr[RandomAccessFile]* reader)
 cdef get_writer(object source, shared_ptr[OutputStream]* writer)
 
 cdef dict box_metadata(const CKeyValueMetadata* sp_metadata)

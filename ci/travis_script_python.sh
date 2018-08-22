@@ -27,6 +27,8 @@ export PARQUET_HOME=$ARROW_PYTHON_PARQUET_HOME
 export LD_LIBRARY_PATH=$ARROW_HOME/lib:$PARQUET_HOME/lib:$LD_LIBRARY_PATH
 export PYARROW_CXXFLAGS="-Werror"
 
+PYARROW_PYTEST_FLAGS=" -r sxX --durations=15 --parquet"
+
 PYTHON_VERSION=$1
 CONDA_ENV_DIR=$TRAVIS_BUILD_DIR/pyarrow-test-$PYTHON_VERSION
 
@@ -36,12 +38,26 @@ source activate $CONDA_ENV_DIR
 python --version
 which python
 
+if [ $ARROW_TRAVIS_PYTHON_JVM == "1" ]; then
+  CONDA_JVM_DEPS="jpype1"
+fi
+
 conda install -y -q pip \
       nomkl \
       cloudpickle \
       numpy=1.13.1 \
+      ${CONDA_JVM_DEPS} \
       pandas \
       cython
+
+if [ "$ARROW_TRAVIS_PYTHON_DOCS" == "1" ] && [ "$PYTHON_VERSION" == "3.6" ]; then
+  # Build documentation depedencies
+  conda install -y -q \
+        ipython \
+        numpydoc \
+        sphinx \
+        sphinx_bootstrap_theme
+fi
 
 # ARROW-2093: PyTorch increases the size of our conda dependency stack
 # significantly, and so we have disabled these tests in Travis CI for now
@@ -51,6 +67,11 @@ conda install -y -q pip \
 #   # PyTorch seems to be broken on Python 2.7 on macOS so we skip it
 #   conda install -y -q pytorch torchvision -c soumith
 # fi
+
+if [ $TRAVIS_OS_NAME != "osx" ]; then
+  conda install -y -c conda-forge tensorflow
+  PYARROW_PYTEST_FLAGS="$PYARROW_PYTEST_FLAGS --tensorflow"
+fi
 
 # Re-build C++ libraries with the right Python setup
 mkdir -p $ARROW_CPP_BUILD_DIR
@@ -69,8 +90,10 @@ fi
 cmake -GNinja \
       $CMAKE_COMMON_FLAGS \
       -DARROW_BUILD_TESTS=on \
+      -DARROW_TEST_INCLUDE_LABELS=python \
       -DARROW_BUILD_UTILITIES=off \
       -DARROW_PLASMA=on \
+      -DARROW_TENSORFLOW=on \
       -DARROW_PYTHON=on \
       -DARROW_ORC=on \
       -DCMAKE_BUILD_TYPE=$ARROW_BUILD_TYPE \
@@ -89,45 +112,47 @@ pushd $ARROW_PYTHON_DIR
 
 # Other stuff pip install
 pip install -q -r requirements.txt
-if [ "$PYTHON_VERSION" == "2.7" ]; then
-  pip install -q futures
+
+if [ "$PYTHON_VERSION" == "3.6" ]; then
+    pip install -q pickle5
 fi
 if [ "$ARROW_TRAVIS_COVERAGE" == "1" ]; then
     export PYARROW_GENERATE_COVERAGE=1
     pip install -q coverage
 fi
 
+export PKG_CONFIG_PATH=$PKG_CONFIG_PATH:$ARROW_CPP_INSTALL/lib/pkgconfig
+
 export PYARROW_BUILD_TYPE=$ARROW_BUILD_TYPE
 export PYARROW_WITH_PARQUET=1
 export PYARROW_WITH_PLASMA=1
 export PYARROW_WITH_ORC=1
 
-python setup.py build_ext -q --inplace
+python setup.py develop
 
 # Basic sanity checks
 python -c "import pyarrow.parquet"
 python -c "import pyarrow.plasma"
 python -c "import pyarrow.orc"
 
-if [ "$ARROW_TRAVIS_VALGRIND" == "1" ]; then
-  export PLASMA_VALGRIND=1
-fi
+echo "PLASMA_VALGRIND: $PLASMA_VALGRIND"
 
 # Set up huge pages for plasma test
 if [ $TRAVIS_OS_NAME == "linux" ]; then
+    sudo sysctl -w vm.nr_hugepages=2048
     sudo mkdir -p /mnt/hugepages
     sudo mount -t hugetlbfs -o uid=`id -u` -o gid=`id -g` none /mnt/hugepages
     sudo bash -c "echo `id -g` > /proc/sys/vm/hugetlb_shm_group"
-    sudo bash -c "echo 20000 > /proc/sys/vm/nr_hugepages"
+    sudo bash -c "echo 2048 > /proc/sys/vm/nr_hugepages"
 fi
 
 # Need to run tests from the source tree for Cython coverage and conftest.py
 if [ "$ARROW_TRAVIS_COVERAGE" == "1" ]; then
     # Output Python coverage data in a persistent place
     export COVERAGE_FILE=$ARROW_PYTHON_COVERAGE_FILE
-    coverage run --append -m pytest -r sxX --durations=15 --parquet pyarrow/tests
+    coverage run --append -m pytest $PYARROW_PYTEST_FLAGS pyarrow/tests
 else
-    python -m pytest -r sxX --durations=15 --parquet pyarrow/tests
+    python -m pytest $PYARROW_PYTEST_FLAGS pyarrow/tests
 fi
 
 if [ "$ARROW_TRAVIS_COVERAGE" == "1" ]; then
@@ -139,7 +164,8 @@ if [ "$ARROW_TRAVIS_COVERAGE" == "1" ]; then
     coverage xml -i -o $TRAVIS_BUILD_DIR/coverage.xml
     # Capture C++ coverage info and combine with previous coverage file
     pushd $TRAVIS_BUILD_DIR
-    lcov --quiet --directory . --capture --no-external --output-file coverage-python-tests.info
+    lcov --quiet --directory . --capture --no-external --output-file coverage-python-tests.info \
+        2>&1 | grep -v "WARNING: no data found for /usr/include"
     lcov --add-tracefile coverage-python-tests.info \
         --add-tracefile $ARROW_CPP_COVERAGE_FILE \
         --output-file $ARROW_CPP_COVERAGE_FILE
@@ -147,25 +173,12 @@ if [ "$ARROW_TRAVIS_COVERAGE" == "1" ]; then
     popd   # $TRAVIS_BUILD_DIR
 fi
 
-popd  # $ARROW_PYTHON_DIR
-
-
 if [ "$ARROW_TRAVIS_PYTHON_DOCS" == "1" ] && [ "$PYTHON_VERSION" == "3.6" ]; then
-  # Build documentation once
-  conda install -y -q \
-        ipython \
-        matplotlib \
-        numpydoc \
-        sphinx \
-        sphinx_bootstrap_theme
-
-  pushd $ARROW_PYTHON_DIR
-  # For autodoc, make sure PyArrow is installed
-  python setup.py install -q --single-version-externally-managed --record=record.text
   cd doc
   sphinx-build -q -b html -d _build/doctrees -W source _build/html
-  popd  # $ARROW_PYTHON_DIR
 fi
+
+popd  # $ARROW_PYTHON_DIR
 
 if [ "$ARROW_TRAVIS_PYTHON_BENCHMARKS" == "1" ] && [ "$PYTHON_VERSION" == "3.6" ]; then
   # Check the ASV benchmarking setup.
@@ -176,7 +189,7 @@ if [ "$ARROW_TRAVIS_PYTHON_BENCHMARKS" == "1" ] && [ "$PYTHON_VERSION" == "3.6" 
   source activate pyarrow_asv
   pip install -q git+https://github.com/pitrou/asv.git@customize_commands
 
-  export PYARROW_WITH_PARQUET=0
+  export PYARROW_WITH_PARQUET=1
   export PYARROW_WITH_PLASMA=1
   export PYARROW_WITH_ORC=0
 

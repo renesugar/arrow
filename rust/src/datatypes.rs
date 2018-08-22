@@ -15,9 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use super::error::ArrowError;
-use serde_json::Value;
 use std::fmt;
+use std::mem::size_of;
+use std::slice::from_raw_parts;
+
+use error::{ArrowError, Result};
+use serde_json::Value;
 
 /// Arrow data type
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,7 +51,7 @@ pub struct Field {
 }
 
 /// Primitive type (ints, floats, strings)
-pub trait ArrowPrimitiveType: Copy + PartialOrd + 'static {}
+pub trait ArrowPrimitiveType: Send + Sync + Copy + PartialOrd + 'static {}
 
 impl ArrowPrimitiveType for bool {}
 impl ArrowPrimitiveType for u8 {}
@@ -62,10 +65,34 @@ impl ArrowPrimitiveType for i64 {}
 impl ArrowPrimitiveType for f32 {}
 impl ArrowPrimitiveType for f64 {}
 
+pub trait ToByteSlice {
+    /// Converts this instance into a byte slice.
+    fn to_byte_slice(&self) -> &[u8];
+}
+
+impl<T> ToByteSlice for [T]
+where
+    T: ArrowPrimitiveType,
+{
+    fn to_byte_slice(&self) -> &[u8] {
+        let raw_ptr = self.as_ptr() as *const T as *const u8;
+        unsafe { from_raw_parts(raw_ptr, self.len() * size_of::<T>()) }
+    }
+}
+
+impl<T> ToByteSlice for T
+where
+    T: ArrowPrimitiveType,
+{
+    fn to_byte_slice(&self) -> &[u8] {
+        let raw_ptr = self as *const T as *const u8;
+        unsafe { from_raw_parts(raw_ptr, size_of::<T>()) }
+    }
+}
+
 impl DataType {
     /// Parse a data type from a JSON representation
-    fn from(json: &Value) -> Result<DataType, ArrowError> {
-        //println!("DataType::from({:?})", json);
+    fn from(json: &Value) -> Result<DataType> {
         match *json {
             Value::Object(ref map) => match map.get("name") {
                 Some(s) if s == "bool" => Ok(DataType::Boolean),
@@ -120,7 +147,7 @@ impl DataType {
                         let fields = fields_array
                             .iter()
                             .map(|f| Field::from(f))
-                            .collect::<Result<Vec<Field>, ArrowError>>();
+                            .collect::<Result<Vec<Field>>>();
                         Ok(DataType::Struct(fields?))
                     }
                     _ => Err(ArrowError::ParseError("empty type".to_string())),
@@ -165,8 +192,8 @@ impl Field {
     pub fn new(name: &str, data_type: DataType, nullable: bool) -> Self {
         Field {
             name: name.to_string(),
-            data_type: data_type,
-            nullable: nullable,
+            data_type,
+            nullable,
         }
     }
 
@@ -183,8 +210,7 @@ impl Field {
     }
 
     /// Parse a field definition from a JSON representation
-    pub fn from(json: &Value) -> Result<Self, ArrowError> {
-        //println!("Field::from({:?}", json);
+    pub fn from(json: &Value) -> Result<Self> {
         match *json {
             Value::Object(ref map) => {
                 let name = match map.get("name") {
@@ -256,7 +282,7 @@ impl Schema {
     }
 
     pub fn new(columns: Vec<Field>) -> Self {
-        Schema { columns: columns }
+        Schema { columns }
     }
 
     pub fn columns(&self) -> &Vec<Field> {
@@ -278,11 +304,14 @@ impl Schema {
 
 impl fmt::Display for Schema {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        f.write_str(&self.columns
-            .iter()
-            .map(|c| c.to_string())
-            .collect::<Vec<String>>()
-            .join(", "))
+        f.write_str(
+            &self
+                .columns
+                .iter()
+                .map(|c| c.to_string())
+                .collect::<Vec<String>>()
+                .join(", "),
+        )
     }
 }
 

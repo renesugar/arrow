@@ -53,7 +53,9 @@ if (MSVC)
     string(REPLACE "/W3" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
 
     # Set desired warning level (e.g. set /W4 for more warnings)
-    set(CXX_COMMON_FLAGS "/W3")
+    #
+    # ARROW-2986: Without /EHsc we get C4530 warning
+    set(CXX_COMMON_FLAGS "/W3 /EHsc")
   endif()
 
   if (ARROW_USE_STATIC_CRT)
@@ -80,6 +82,10 @@ if (NOT BUILD_WARNING_LEVEL)
 endif(NOT BUILD_WARNING_LEVEL)
 
 string(TOUPPER ${BUILD_WARNING_LEVEL} UPPERCASE_BUILD_WARNING_LEVEL)
+
+if (NOT ("${COMPILER_FAMILY}" STREQUAL "msvc"))
+  set(CXX_ONLY_FLAGS "${CXX_ONLY_FLAGS} -std=c++11")
+endif()
 
 if ("${UPPERCASE_BUILD_WARNING_LEVEL}" STREQUAL "CHECKIN")
   # Pre-checkin builds
@@ -124,9 +130,11 @@ if ("${UPPERCASE_BUILD_WARNING_LEVEL}" STREQUAL "CHECKIN")
     # Treat all compiler warnings as errors
     set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wno-unknown-warning-option -Werror")
   elseif ("${COMPILER_FAMILY}" STREQUAL "gcc")
-    set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wall -Wconversion -Wno-sign-conversion")
+    set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wall \
+-Wconversion -Wno-sign-conversion")
+
     # Treat all compiler warnings as errors
-    set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wno-unknown-warning-option -Werror")
+    set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Werror")
   else()
     message(FATAL_ERROR "Unknown compiler. Version info:\n${COMPILER_VERSION_FULL}")
   endif()
@@ -172,8 +180,21 @@ if ("${COMPILER_FAMILY}" STREQUAL "msvc")
   set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} /wd4800")
 endif()
 
-# Avoid clang error when an unknown warning flag is passed
+if ("${COMPILER_FAMILY}" STREQUAL "gcc")
+  # Without this, gcc >= 7 warns related to changes in C++17
+  set(CXX_ONLY_FLAGS "${CXX_ONLY_FLAGS} -Wno-noexcept-type")
+endif()
+
+# Clang options for all builds
 if ("${COMPILER_FAMILY}" STREQUAL "clang")
+  # Using Clang with ccache causes a bunch of spurious warnings that are
+  # purportedly fixed in the next version of ccache. See the following for details:
+  #
+  #   http://petereisentraut.blogspot.com/2011/05/ccache-and-clang.html
+  #   http://petereisentraut.blogspot.com/2011/09/ccache-and-clang-part-2.html
+  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Qunused-arguments")
+
+  # Avoid clang error when an unknown warning flag is passed
   set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -Wno-unknown-warning-option")
 endif()
 
@@ -183,10 +204,6 @@ if (BUILD_WARNING_FLAGS)
   # warnings (use with Clang's -Weverything flag to find potential errors)
   set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} ${BUILD_WARNING_FLAGS}")
 endif(BUILD_WARNING_FLAGS)
-
-if (NOT ("${COMPILER_FAMILY}" STREQUAL "msvc"))
-set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -std=c++11")
-endif()
 
 # Only enable additional instruction sets if they are supported
 if (CXX_SUPPORTS_SSE3 AND ARROW_SSE3)
@@ -202,6 +219,95 @@ if (APPLE)
   # the default standard library which does not support C++11. libc++ is the
   # default from 10.9 onward.
   set(CXX_COMMON_FLAGS "${CXX_COMMON_FLAGS} -stdlib=libc++")
+endif()
+
+# ----------------------------------------------------------------------
+# Setup Gold linker, if available. Code originally from Apache Kudu
+
+# Interrogates the linker version via the C++ compiler to determine whether
+# we're using the gold linker, and if so, extracts its version.
+#
+# If the gold linker is being used, sets GOLD_VERSION in the parent scope with
+# the extracted version.
+#
+# Any additional arguments are passed verbatim into the C++ compiler invocation.
+function(GET_GOLD_VERSION)
+  # The gold linker is only for ELF binaries, which macOS doesn't use.
+  execute_process(COMMAND ${CMAKE_CXX_COMPILER} "-Wl,--version" ${ARGN}
+    ERROR_QUIET
+    OUTPUT_VARIABLE LINKER_OUTPUT)
+  # We're expecting LINKER_OUTPUT to look like one of these:
+  #   GNU gold (version 2.24) 1.11
+  #   GNU gold (GNU Binutils for Ubuntu 2.30) 1.15
+  if (LINKER_OUTPUT MATCHES "GNU gold")
+    string(REGEX MATCH "GNU gold \\([^\\)]*\\) (([0-9]+\\.?)+)" _ "${LINKER_OUTPUT}")
+    if (NOT CMAKE_MATCH_1)
+      message(SEND_ERROR "Could not extract GNU gold version. "
+        "Linker version output: ${LINKER_OUTPUT}")
+    endif()
+    set(GOLD_VERSION "${CMAKE_MATCH_1}" PARENT_SCOPE)
+  endif()
+endfunction()
+
+# Is the compiler hard-wired to use the gold linker?
+if (NOT MSVC AND NOT APPLE)
+  GET_GOLD_VERSION()
+  if (GOLD_VERSION)
+    set(MUST_USE_GOLD 1)
+  else()
+    # Can the compiler optionally enable the gold linker?
+    GET_GOLD_VERSION("-fuse-ld=gold")
+
+    # We can't use the gold linker if it's inside devtoolset because the compiler
+    # won't find it when invoked directly from make/ninja (which is typically
+    # done outside devtoolset).
+    execute_process(COMMAND which ld.gold
+      OUTPUT_VARIABLE GOLD_LOCATION
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET)
+    if ("${GOLD_LOCATION}" MATCHES "^/opt/rh/devtoolset")
+      message("Skipping optional gold linker (version ${GOLD_VERSION}) because "
+        "it's in devtoolset")
+      set(GOLD_VERSION)
+    endif()
+  endif()
+
+  if (GOLD_VERSION)
+    # Older versions of the gold linker are vulnerable to a bug [1] which
+    # prevents weak symbols from being overridden properly. This leads to
+    # omitting of dependencies like tcmalloc (used in Kudu, where this
+    # workaround was written originally)
+    #
+    # How we handle this situation depends on other factors:
+    # - If gold is optional, we won't use it.
+    # - If gold is required, we'll either:
+    #   - Raise an error in RELEASE builds (we shouldn't release such a product), or
+    #   - Drop tcmalloc in all other builds.
+    #
+    # 1. https://sourceware.org/bugzilla/show_bug.cgi?id=16979.
+    if ("${GOLD_VERSION}" VERSION_LESS "1.12")
+      set(ARROW_BUGGY_GOLD 1)
+    endif()
+    if (MUST_USE_GOLD)
+      message("Using hard-wired gold linker (version ${GOLD_VERSION})")
+      if (ARROW_BUGGY_GOLD)
+        if ("${ARROW_LINK}" STREQUAL "d" AND
+            "${CMAKE_BUILD_TYPE}" STREQUAL "RELEASE")
+          message(SEND_ERROR "Configured to use buggy gold with dynamic linking "
+            "in a RELEASE build")
+        endif()
+      endif()
+    elseif (NOT ARROW_BUGGY_GOLD)
+      # The Gold linker must be manually enabled.
+      set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fuse-ld=gold")
+      set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fuse-ld=gold")
+      message("Using optional gold linker (version ${GOLD_VERSION})")
+    else()
+      message("Optional gold linker is buggy, using ld linker instead")
+    endif()
+  else()
+    message("Using ld linker")
+  endif()
 endif()
 
 # compiler flags for different build types (run 'cmake -DCMAKE_BUILD_TYPE=<type> .')

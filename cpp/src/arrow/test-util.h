@@ -44,20 +44,24 @@
 #include "arrow/util/decimal.h"
 #include "arrow/util/logging.h"
 
-#define ASSERT_RAISES(ENUM, expr) \
-  do {                            \
-    ::arrow::Status s = (expr);   \
-    if (!s.Is##ENUM()) {          \
-      FAIL() << s.ToString();     \
-    }                             \
+#define STRINGIFY(x) #x
+
+#define ASSERT_RAISES(ENUM, expr)                                         \
+  do {                                                                    \
+    ::arrow::Status s = (expr);                                           \
+    if (!s.Is##ENUM()) {                                                  \
+      FAIL() << "Expected '" STRINGIFY(expr) "' to fail with " STRINGIFY( \
+                    ENUM) ", but got "                                    \
+             << s.ToString();                                             \
+    }                                                                     \
   } while (false)
 
-#define ASSERT_OK(expr)         \
-  do {                          \
-    ::arrow::Status s = (expr); \
-    if (!s.ok()) {              \
-      FAIL() << s.ToString();   \
-    }                           \
+#define ASSERT_OK(expr)                                               \
+  do {                                                                \
+    ::arrow::Status s = (expr);                                       \
+    if (!s.ok()) {                                                    \
+      FAIL() << "'" STRINGIFY(expr) "' failed with " << s.ToString(); \
+    }                                                                 \
   } while (false)
 
 #define ASSERT_OK_NO_THROW(expr) ASSERT_NO_THROW(ASSERT_OK(expr))
@@ -93,8 +97,6 @@ using ArrayVector = std::vector<std::shared_ptr<Array>>;
     }                                                                                  \
   } while (false)
 
-namespace test {
-
 template <typename T, typename U>
 void randint(int64_t N, T lower, T upper, std::vector<U>* out) {
   const int random_seed = 0;
@@ -124,10 +126,12 @@ inline Status CopyBufferFromVector(const std::vector<T>& values, MemoryPool* poo
                                    std::shared_ptr<Buffer>* result) {
   int64_t nbytes = static_cast<int>(values.size()) * sizeof(T);
 
-  auto buffer = std::make_shared<PoolBuffer>(pool);
-  RETURN_NOT_OK(buffer->Resize(nbytes));
+  std::shared_ptr<Buffer> buffer;
+  RETURN_NOT_OK(AllocateBuffer(pool, nbytes, &buffer));
   auto immutable_data = reinterpret_cast<const uint8_t*>(values.data());
   std::copy(immutable_data, immutable_data + nbytes, buffer->mutable_data());
+  memset(buffer->mutable_data() + nbytes, 0,
+         static_cast<size_t>(buffer->capacity() - nbytes));
 
   *result = buffer;
   return Status::OK();
@@ -139,7 +143,7 @@ static inline Status GetBitmapFromVector(const std::vector<T>& is_valid,
   size_t length = is_valid.size();
 
   std::shared_ptr<Buffer> buffer;
-  RETURN_NOT_OK(GetEmptyBitmap(default_memory_pool(), length, &buffer));
+  RETURN_NOT_OK(AllocateEmptyBitmap(length, &buffer));
 
   uint8_t* bitmap = buffer->mutable_data();
   for (size_t i = 0; i < static_cast<size_t>(length); ++i) {
@@ -278,29 +282,27 @@ static inline void random_ascii(int64_t n, uint32_t seed, uint8_t* out) {
   rand_uniform_int(n, seed, static_cast<int32_t>('A'), static_cast<int32_t>('z'), out);
 }
 
-static inline int64_t null_count(const std::vector<uint8_t>& valid_bytes) {
+static inline int64_t CountNulls(const std::vector<uint8_t>& valid_bytes) {
   return static_cast<int64_t>(std::count(valid_bytes.cbegin(), valid_bytes.cend(), '\0'));
 }
 
-Status MakeRandomInt32PoolBuffer(int64_t length, MemoryPool* pool,
-                                 std::shared_ptr<PoolBuffer>* pool_buffer,
-                                 uint32_t seed = 0) {
+Status MakeRandomInt32Buffer(int64_t length, MemoryPool* pool,
+                             std::shared_ptr<ResizableBuffer>* out, uint32_t seed = 0) {
   DCHECK(pool);
-  auto data = std::make_shared<PoolBuffer>(pool);
-  RETURN_NOT_OK(data->Resize(length * sizeof(int32_t)));
-  test::rand_uniform_int(length, seed, 0, std::numeric_limits<int32_t>::max(),
-                         reinterpret_cast<int32_t*>(data->mutable_data()));
-  *pool_buffer = data;
+  std::shared_ptr<ResizableBuffer> result;
+  RETURN_NOT_OK(AllocateResizableBuffer(pool, sizeof(int32_t) * length, &result));
+  rand_uniform_int(length, seed, 0, std::numeric_limits<int32_t>::max(),
+                   reinterpret_cast<int32_t*>(result->mutable_data()));
+  *out = result;
   return Status::OK();
 }
 
-Status MakeRandomBytePoolBuffer(int64_t length, MemoryPool* pool,
-                                std::shared_ptr<PoolBuffer>* pool_buffer,
-                                uint32_t seed = 0) {
-  auto bytes = std::make_shared<PoolBuffer>(pool);
-  RETURN_NOT_OK(bytes->Resize(length));
-  test::random_bytes(length, seed, bytes->mutable_data());
-  *pool_buffer = bytes;
+Status MakeRandomByteBuffer(int64_t length, MemoryPool* pool,
+                            std::shared_ptr<ResizableBuffer>* out, uint32_t seed = 0) {
+  std::shared_ptr<ResizableBuffer> result;
+  RETURN_NOT_OK(AllocateResizableBuffer(pool, length, &result));
+  random_bytes(length, seed, result->mutable_data());
+  *out = result;
   return Status::OK();
 }
 
@@ -367,8 +369,6 @@ void AssertTablesEqual(const Table& expected, const Table& actual,
     }
   }
 }
-
-}  // namespace test
 
 template <typename TYPE, typename C_TYPE>
 void ArrayFromVector(const std::shared_ptr<DataType>& type,

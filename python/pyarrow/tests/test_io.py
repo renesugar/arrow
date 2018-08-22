@@ -15,8 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from functools import partial
-from io import BytesIO, TextIOWrapper
+from io import (BytesIO, TextIOWrapper, BufferedIOBase, IOBase)
 import gc
 import os
 import pickle
@@ -106,6 +105,47 @@ def test_python_file_read():
     f.close()
 
 
+def test_python_file_readall():
+    data = b'some sample data'
+
+    buf = BytesIO(data)
+    with pa.PythonFile(buf, mode='r') as f:
+        assert f.readall() == data
+
+
+def test_python_file_readinto():
+    length = 10
+    data = b'some sample data longer than 10'
+    dst_buf = bytearray(length)
+    src_buf = BytesIO(data)
+
+    with pa.PythonFile(src_buf, mode='r') as f:
+        assert f.readinto(dst_buf) == 10
+
+        assert dst_buf[:length] == data[:length]
+        assert len(dst_buf) == length
+
+
+def test_python_file_correct_abc():
+    with pa.PythonFile(BytesIO(b''), mode='r') as f:
+        assert isinstance(f, BufferedIOBase)
+        assert isinstance(f, IOBase)
+
+
+def test_python_file_iterable():
+    data = b'''line1
+    line2
+    line3
+    '''
+
+    buf = BytesIO(data)
+    buf2 = BytesIO(data)
+
+    with pa.PythonFile(buf, mode='r') as f:
+        for read, expected in zip(f, buf2):
+            assert read == expected
+
+
 def test_python_file_large_seeks():
     def factory(filename):
         return pa.PythonFile(open(filename, 'rb'))
@@ -126,6 +166,9 @@ def test_bytes_reader():
 
     f.seek(0)
     assert f.tell() == 0
+
+    f.seek(0, 2)
+    assert f.tell() == len(data)
 
     f.seek(5)
     assert f.tell() == 5
@@ -181,6 +224,26 @@ def test_python_file_implicit_mode(tmpdir):
     assert bio.getvalue() == b'foobar\n'
 
 
+def test_python_file_writelines(tmpdir):
+    lines = [b'line1\n', b'line2\n' b'line3']
+    path = os.path.join(str(tmpdir), 'foo.txt')
+    with open(path, 'wb') as f:
+        try:
+            f = pa.PythonFile(f, mode='w')
+            assert f.writable()
+            f.writelines(lines)
+        finally:
+            f.close()
+
+    with open(path, 'rb') as f:
+        try:
+            f = pa.PythonFile(f, mode='r')
+            assert f.readable()
+            assert f.read() == b''.join(lines)
+        finally:
+            f.close()
+
+
 def test_python_file_closing():
     bio = BytesIO()
     pf = pa.PythonFile(bio)
@@ -191,6 +254,18 @@ def test_python_file_closing():
     pf = pa.PythonFile(bio)
     pf.close()
     assert bio.closed
+
+
+# ----------------------------------------------------------------------
+# MemoryPool
+
+
+def test_memory_pool_cannot_use_ctor():
+    with pytest.raises(TypeError):
+        pa.MemoryPool()
+
+    with pytest.raises(TypeError):
+        pa.ProxyMemoryPool()
 
 
 # ----------------------------------------------------------------------
@@ -269,6 +344,26 @@ def test_buffer_from_numpy():
         buf = pa.py_buffer(arr.T[::2])
 
 
+def test_buffer_address():
+    b1 = b'some data!'
+    b2 = bytearray(b1)
+    b3 = bytearray(b1)
+
+    buf1 = pa.py_buffer(b1)
+    buf2 = pa.py_buffer(b1)
+    buf3 = pa.py_buffer(b2)
+    buf4 = pa.py_buffer(b3)
+
+    assert buf1.address > 0
+    assert buf1.address == buf2.address
+    assert buf3.address != buf2.address
+    assert buf4.address != buf3.address
+
+    arr = np.arange(5)
+    buf = pa.py_buffer(arr)
+    assert buf.address == arr.ctypes.data
+
+
 def test_buffer_equals():
     # Buffer.equals() returns true iff the buffers have the same contents
     def eq(a, b):
@@ -298,6 +393,57 @@ def test_buffer_equals():
     eq(buf2, buf5)
 
 
+def test_buffer_getitem():
+    data = bytearray(b'some data!')
+    buf = pa.py_buffer(data)
+
+    n = len(data)
+    for ix in range(-n, n - 1):
+        assert buf[ix] == data[ix]
+
+    with pytest.raises(IndexError):
+        buf[n]
+
+    with pytest.raises(IndexError):
+        buf[-n - 1]
+
+
+def test_buffer_slicing():
+    data = b'some data!'
+    buf = pa.py_buffer(data)
+
+    sliced = buf.slice(2)
+    expected = pa.py_buffer(b'me data!')
+    assert sliced.equals(expected)
+
+    sliced2 = buf.slice(2, 4)
+    expected2 = pa.py_buffer(b'me d')
+    assert sliced2.equals(expected2)
+
+    # 0 offset
+    assert buf.slice(0).equals(buf)
+
+    # Slice past end of buffer
+    assert len(buf.slice(len(buf))) == 0
+
+    with pytest.raises(IndexError):
+        buf.slice(-1)
+
+    # Test slice notation
+    assert buf[2:].equals(buf.slice(2))
+    assert buf[2:5].equals(buf.slice(2, 3))
+    assert buf[-5:].equals(buf.slice(len(buf) - 5))
+    with pytest.raises(IndexError):
+        buf[::-1]
+    with pytest.raises(IndexError):
+        buf[::2]
+
+    n = len(buf)
+    for start in range(-n * 2, n * 2):
+        for stop in range(-n * 2, n * 2):
+            assert buf[start:stop].to_pybytes() == buf.to_pybytes()[start:stop]
+
+
 def test_buffer_hashing():
     # Buffers are unhashable
     with pytest.raises(TypeError, match="unhashable"):
@@ -321,6 +467,7 @@ def test_allocate_buffer():
     buf = pa.allocate_buffer(100)
     assert buf.size == 100
     assert buf.is_mutable
+    assert buf.parent is None
 
     bit = b'abcde'
     writer = pa.FixedSizeBufferWriter(buf)
@@ -387,25 +534,9 @@ def test_buffer_memoryview_is_immutable():
 
 def test_uninitialized_buffer():
     # ARROW-2039: calling Buffer() directly creates an uninitialized object
-    check_uninitialized = partial(pytest.raises,
-                                  ReferenceError, match="uninitialized")
-    buf = pa.Buffer()
-    with check_uninitialized():
-        buf.size
-    with check_uninitialized():
-        len(buf)
-    with check_uninitialized():
-        buf.is_mutable
-    with check_uninitialized():
-        buf.parent
-    with check_uninitialized():
-        buf.to_pybytes()
-    with check_uninitialized():
-        memoryview(buf)
-    with check_uninitialized():
-        buf.equals(pa.py_buffer(b''))
-    with check_uninitialized():
-        pa.py_buffer(b'').equals(buf)
+    # ARROW-2638: prevent calling extension class constructors directly
+    with pytest.raises(TypeError):
+        pa.Buffer()
 
 
 def test_memory_output_stream():
@@ -418,7 +549,7 @@ def test_memory_output_stream():
     for i in range(K):
         f.write(val)
 
-    buf = f.get_result()
+    buf = f.getvalue()
 
     assert len(buf) == len(val) * K
     assert buf.to_pybytes() == val * K
@@ -427,7 +558,7 @@ def test_memory_output_stream():
 def test_inmemory_write_after_closed():
     f = pa.BufferOutputStream()
     f.write(b'ok')
-    f.get_result()
+    f.getvalue()
 
     with pytest.raises(ValueError):
         f.write(b'not ok')
@@ -459,7 +590,7 @@ def test_nativefile_write_memoryview():
     f.write(arr)
     f.write(bytearray(data))
 
-    buf = f.get_result()
+    buf = f.getvalue()
 
     assert buf.to_pybytes() == data * 2
 
@@ -483,7 +614,7 @@ def test_mock_output_stream():
         f1.write(val)
         f2.write(val)
 
-    assert f1.size() == len(f2.get_result())
+    assert f1.size() == len(f2.getvalue())
 
     # Do the same test with a pandas DataFrame
     val = pd.DataFrame({'a': [1, 2, 3]})
@@ -500,7 +631,7 @@ def test_mock_output_stream():
     stream_writer1.close()
     stream_writer2.close()
 
-    assert f1.size() == len(f2.get_result())
+    assert f1.size() == len(f2.getvalue())
 
 
 # ----------------------------------------------------------------------
@@ -520,6 +651,7 @@ def sample_disk_data(request, tmpdir):
 
     def teardown():
         _try_delete(path)
+
     request.addfinalizer(teardown)
     return path, data
 
@@ -629,6 +761,26 @@ def test_memory_map_writer(tmpdir):
 
     f.seek(0)
     assert f.read(3) == b'foo'
+
+
+def test_memory_map_resize(tmpdir):
+    SIZE = 4096
+    arr = np.random.randint(0, 256, size=SIZE).astype(np.uint8)
+    data1 = arr.tobytes()[:(SIZE // 2)]
+    data2 = arr.tobytes()[(SIZE // 2):]
+
+    path = os.path.join(str(tmpdir), guid())
+
+    mmap = pa.create_memory_map(path, SIZE / 2)
+    mmap.write(data1)
+
+    mmap.resize(SIZE)
+    mmap.write(data2)
+
+    mmap.close()
+
+    with open(path, 'rb') as f:
+        assert f.read() == arr.tobytes()
 
 
 def test_memory_zero_length(tmpdir):

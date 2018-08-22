@@ -19,7 +19,8 @@
 # arrow::ipc
 
 from libc.stdlib cimport malloc, free
-from pyarrow.compat import frombytes, tobytes, encode_file_path
+from pyarrow.compat import builtin_pickle, frombytes, tobytes, encode_file_path
+from io import BufferedIOBase, UnsupportedOperation
 
 import re
 import six
@@ -52,6 +53,7 @@ def _stringify_path(path):
 
 
 cdef class NativeFile:
+
     def __cinit__(self):
         self.closed = True
         self.own_file = False
@@ -68,7 +70,8 @@ cdef class NativeFile:
     def __exit__(self, exc_type, exc_value, tb):
         self.close()
 
-    property mode:
+    @property
+    def mode(self):
         """
         The file mode. Currently instances of NativeFile may support:
 
@@ -76,17 +79,15 @@ cdef class NativeFile:
         * wb: binary write
         * rb+: binary read and write
         """
-
-        def __get__(self):
-            # Emulate built-in file modes
-            if self.is_readable and self.is_writable:
-                return 'rb+'
-            elif self.is_readable:
-                return 'rb'
-            elif self.is_writable:
-                return 'wb'
-            else:
-                raise ValueError('File object is malformed, has no mode')
+        # Emulate built-in file modes
+        if self.is_readable and self.is_writable:
+            return 'rb+'
+        elif self.is_readable:
+            return 'rb'
+        elif self.is_writable:
+            return 'wb'
+        else:
+            raise ValueError('File object is malformed, has no mode')
 
     def readable(self):
         self._assert_open()
@@ -99,6 +100,13 @@ cdef class NativeFile:
     def seekable(self):
         self._assert_open()
         return self.is_readable
+
+    def isatty(self):
+        self._assert_open()
+        return False
+
+    def fileno(self):
+        raise UnsupportedOperation()
 
     def close(self):
         if not self.closed:
@@ -262,6 +270,72 @@ cdef class NativeFile:
         Alias for read, needed to match the IOBase interface."""
         return self.read(nbytes=None)
 
+    def readall(self):
+        return self.read()
+
+    def readinto(self, b):
+        """
+        Read into the supplied buffer
+
+        Parameters
+        -----------
+        b: any python object supporting buffer interface
+
+        Returns
+        --------
+        number of bytes written
+        """
+
+        cdef:
+            int64_t bytes_read
+            uint8_t* buf
+            Buffer py_buf
+            int64_t buf_len
+
+        self._assert_readable()
+
+        py_buf = py_buffer(b)
+        buf_len = py_buf.size
+
+        buf = py_buf.buffer.get().mutable_data()
+
+        with nogil:
+            check_status(self.rd_file.get().Read(buf_len, &bytes_read, buf))
+
+        return bytes_read
+
+    def readline(self, size=None):
+        """Read and return a line of bytes from the file.
+
+        If size is specified, read at most size bytes.
+
+        Line terminator is always b"\\n".
+        """
+
+        raise UnsupportedOperation()
+
+    def readlines(self, hint=None):
+        """
+        Read lines of the file
+
+        Parameters
+        -----------
+
+        hint: int maximum number of bytes read until we stop
+        """
+
+        raise UnsupportedOperation()
+
+    def __iter__(self):
+        self._assert_readable()
+        return self
+
+    def __next__(self):
+        line = self.readline()
+        if not line:
+            raise StopIteration
+        return line
+
     def read_buffer(self, nbytes=None):
         cdef:
             int64_t c_nbytes
@@ -278,6 +352,15 @@ cdef class NativeFile:
             check_status(self.rd_file.get().ReadB(c_nbytes, &output))
 
         return pyarrow_wrap_buffer(output)
+
+    def truncate(self):
+        raise UnsupportedOperation()
+
+    def writelines(self, lines):
+        self._assert_writable()
+
+        for line in lines:
+            self.write(line)
 
     def download(self, stream_or_path, buffer_size=None):
         """
@@ -414,6 +497,7 @@ cdef class NativeFile:
         if exc_info is not None:
             raise exc_info[0], exc_info[1], exc_info[2]
 
+BufferedIOBase.register(NativeFile)
 
 # ----------------------------------------------------------------------
 # Python file-like objects
@@ -449,12 +533,22 @@ cdef class PythonFile(NativeFile):
 
         self.closed = False
 
+    def truncate(self, pos=None):
+        self.handle.truncate(pos)
+
+    def readline(self, size=None):
+        return self.handle.readline(size)
+
+    def readlines(self, hint=None):
+        return self.handle.readlines(hint)
+
 
 cdef class MemoryMappedFile(NativeFile):
     """
     Supports 'r', 'r+w', 'w' modes
     """
     cdef:
+        shared_ptr[CMemoryMappedFile] handle
         object path
 
     @staticmethod
@@ -473,6 +567,7 @@ cdef class MemoryMappedFile(NativeFile):
         result.is_writable = True
         result.wr_file = <shared_ptr[OutputStream]> handle
         result.rd_file = <shared_ptr[RandomAccessFile]> handle
+        result.handle = handle
         result.closed = False
 
         return result
@@ -503,7 +598,22 @@ cdef class MemoryMappedFile(NativeFile):
 
         self.wr_file = <shared_ptr[OutputStream]> handle
         self.rd_file = <shared_ptr[RandomAccessFile]> handle
+        self.handle = handle
         self.closed = False
+
+    def resize(self, new_size):
+        """
+        Resize the map and underlying file.
+
+        Parameters
+        ----------
+        new_size : new size in bytes
+        """
+        check_status(self.handle.get().Resize(new_size))
+
+    def fileno(self):
+        self._assert_open()
+        return self.handle.get().file_descriptor()
 
 
 def memory_map(path, mode='r'):
@@ -579,6 +689,10 @@ cdef class OSFile(NativeFile):
             check_status(FileOutputStream.Open(path, &self.wr_file))
         self.is_writable = True
 
+    def fileno(self):
+        self._assert_open()
+        return self.handle.file_descriptor()
+
 
 cdef class FixedSizeBufferWriter(NativeFile):
 
@@ -612,46 +726,75 @@ cdef class Buffer:
     def __cinit__(self):
         pass
 
+    def __init__(self):
+        raise TypeError("Do not call Buffer's constructor directly, use "
+                        "`pyarrow.py_buffer` function instead.")
+
     cdef void init(self, const shared_ptr[CBuffer]& buffer):
         self.buffer = buffer
         self.shape[0] = self.size
         self.strides[0] = <Py_ssize_t>(1)
 
-    cdef int _check_nullptr(self) except -1:
-        if self.buffer.get() == NULL:
-            raise ReferenceError("operation on uninitialized Buffer object")
-        return 0
-
     def __len__(self):
         return self.size
 
-    property size:
+    @property
+    def size(self):
+        return self.buffer.get().size()
 
-        def __get__(self):
-            self._check_nullptr()
-            return self.buffer.get().size()
+    @property
+    def address(self):
+        return <uintptr_t> self.buffer.get().data()
 
-    property is_mutable:
+    @property
+    def is_mutable(self):
+        return self.buffer.get().is_mutable()
 
-        def __get__(self):
-            self._check_nullptr()
-            return self.buffer.get().is_mutable()
+    @property
+    def parent(self):
+        cdef shared_ptr[CBuffer] parent_buf = self.buffer.get().parent()
 
-    property parent:
-
-        def __get__(self):
-            self._check_nullptr()
-            cdef shared_ptr[CBuffer] parent_buf = self.buffer.get().parent()
-
-            if parent_buf.get() == NULL:
-                return None
-            else:
-                return pyarrow_wrap_buffer(parent_buf)
+        if parent_buf.get() == NULL:
+            return None
+        else:
+            return pyarrow_wrap_buffer(parent_buf)
 
     def __getitem__(self, key):
-        # TODO(wesm): buffer slicing
-        self._check_nullptr()
-        raise NotImplementedError
+        if PySlice_Check(key):
+            return _normalize_slice(self, key)
+
+        return self.getitem(_normalize_index(key, self.size))
+
+    cdef getitem(self, int64_t i):
+        return self.buffer.get().data()[i]
+
+    def slice(self, offset=0, length=None):
+        """
+        Compute slice of this buffer
+
+        Parameters
+        ----------
+        offset : int, default 0
+            Offset from start of buffer to slice
+        length : int, default None
+            Length of slice (default is until end of Buffer starting from
+            offset)
+
+        Returns
+        -------
+        sliced : Buffer
+        """
+        cdef shared_ptr[CBuffer] result
+
+        if offset < 0:
+            raise IndexError('Offset must be non-negative')
+
+        if length is None:
+            result = SliceBuffer(self.buffer, offset)
+        else:
+            result = SliceBuffer(self.buffer, offset, max(length, 0))
+
+        return pyarrow_wrap_buffer(result)
 
     def equals(self, Buffer other):
         """
@@ -665,8 +808,6 @@ cdef class Buffer:
         -------
         are_equal : True if buffer contents and size are equal
         """
-        self._check_nullptr()
-        other._check_nullptr()
         cdef c_bool result = False
         with nogil:
             result = self.buffer.get().Equals(deref(other.buffer.get()))
@@ -678,18 +819,18 @@ cdef class Buffer:
         else:
             return NotImplemented
 
-    def __reduce__(self):
-        return py_buffer, (self.to_pybytes(),)
+    def __reduce_ex__(self, protocol):
+        if protocol >= 5:
+            return py_buffer, (builtin_pickle.PickleBuffer(self),)
+        else:
+            return py_buffer, (self.to_pybytes(),)
 
     def to_pybytes(self):
-        self._check_nullptr()
         return cp.PyBytes_FromStringAndSize(
             <const char*>self.buffer.get().data(),
             self.buffer.get().size())
 
     def __getbuffer__(self, cp.Py_buffer* buffer, int flags):
-        self._check_nullptr()
-
         buffer.buf = <char *>self.buffer.get().data()
         buffer.format = 'b'
         buffer.internal = NULL
@@ -706,13 +847,11 @@ cdef class Buffer:
         buffer.suboffsets = NULL
 
     def __getsegcount__(self, Py_ssize_t *len_out):
-        self._check_nullptr()
         if len_out != NULL:
             len_out[0] = <Py_ssize_t>self.size
         return 1
 
     def __getreadbuffer__(self, Py_ssize_t idx, void **p):
-        self._check_nullptr()
         if idx != 0:
             raise SystemError("accessing non-existent buffer segment")
         if p != NULL:
@@ -720,7 +859,6 @@ cdef class Buffer:
         return self.size
 
     def __getwritebuffer__(self, Py_ssize_t idx, void **p):
-        self._check_nullptr()
         if not self.buffer.get().is_mutable():
             raise SystemError("trying to write an immutable buffer")
         if idx != 0:
@@ -753,9 +891,10 @@ cdef class ResizableBuffer(Buffer):
                          .Resize(new_size, c_shrink_to_fit))
 
 
-cdef shared_ptr[PoolBuffer] _allocate_buffer(CMemoryPool* pool):
-    cdef shared_ptr[PoolBuffer] result
-    result.reset(new PoolBuffer(pool))
+cdef shared_ptr[CResizableBuffer] _allocate_buffer(CMemoryPool* pool):
+    cdef shared_ptr[CResizableBuffer] result
+    with nogil:
+        check_status(AllocateResizableBuffer(pool, 0, &result))
     return result
 
 
@@ -794,7 +933,7 @@ def allocate_buffer(int64_t size, MemoryPool memory_pool=None,
 cdef class BufferOutputStream(NativeFile):
 
     cdef:
-        shared_ptr[PoolBuffer] buffer
+        shared_ptr[CResizableBuffer] buffer
 
     def __cinit__(self, MemoryPool memory_pool=None):
         self.buffer = _allocate_buffer(maybe_unbox_memory_pool(memory_pool))
@@ -804,6 +943,22 @@ cdef class BufferOutputStream(NativeFile):
         self.closed = False
 
     def get_result(self):
+        """
+        Deprecated as of 0.10.0. Alias for getvalue()
+        """
+        warnings.warn("BufferOutputStream.get_result() has been renamed "
+                      "to getvalue(), will be removed in 0.11.0",
+                      FutureWarning)
+        return self.getvalue()
+
+    def getvalue(self):
+        """
+        Finalize output stream and return result as pyarrow.Buffer.
+
+        Returns
+        -------
+        value : Buffer
+        """
         with nogil:
             check_status(self.wr_file.get().Close())
         self.closed = True
@@ -868,7 +1023,14 @@ def foreign_buffer(address, size, base):
     return pyarrow_wrap_buffer(buf)
 
 
-cdef get_reader(object source, shared_ptr[RandomAccessFile]* reader):
+def as_buffer(object o):
+    if isinstance(o, Buffer):
+        return o
+    return py_buffer(o)
+
+
+cdef get_reader(object source, c_bool use_memory_map,
+                shared_ptr[RandomAccessFile]* reader):
     cdef NativeFile nf
 
     try:
@@ -880,7 +1042,10 @@ cdef get_reader(object source, shared_ptr[RandomAccessFile]* reader):
             # Optimistically hope this is file-like
             source = PythonFile(source, mode='r')
     else:
-        source = memory_map(source_path, mode='r')
+        if use_memory_map:
+            source = memory_map(source_path, mode='r')
+        else:
+            source = OSFile(source_path, mode='r')
 
     if isinstance(source, NativeFile):
         nf = source

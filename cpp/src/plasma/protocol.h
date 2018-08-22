@@ -30,15 +30,18 @@ namespace plasma {
 
 using arrow::Status;
 
+using flatbuf::MessageType;
+using flatbuf::PlasmaError;
+
 template <class T>
-bool verify_flatbuffer(T* object, uint8_t* data, size_t size) {
+bool VerifyFlatbuffer(T* object, uint8_t* data, size_t size) {
   flatbuffers::Verifier verifier(data, size);
   return object->Verify(verifier);
 }
 
 /* Plasma receive message. */
 
-Status PlasmaReceive(int sock, int64_t message_type, std::vector<uint8_t>* buffer);
+Status PlasmaReceive(int sock, MessageType message_type, std::vector<uint8_t>* buffer);
 
 /* Plasma Create message functions. */
 
@@ -48,8 +51,8 @@ Status SendCreateRequest(int sock, ObjectID object_id, int64_t data_size,
 Status ReadCreateRequest(uint8_t* data, size_t size, ObjectID* object_id,
                          int64_t* data_size, int64_t* metadata_size, int* device_num);
 
-Status SendCreateReply(int sock, ObjectID object_id, PlasmaObject* object, int error,
-                       int64_t mmap_size);
+Status SendCreateReply(int sock, ObjectID object_id, PlasmaObject* object,
+                       PlasmaError error, int64_t mmap_size);
 
 Status ReadCreateReply(uint8_t* data, size_t size, ObjectID* object_id,
                        PlasmaObject* object, int* store_fd, int64_t* mmap_size);
@@ -69,7 +72,7 @@ Status SendSealRequest(int sock, ObjectID object_id, unsigned char* digest);
 Status ReadSealRequest(uint8_t* data, size_t size, ObjectID* object_id,
                        unsigned char* digest);
 
-Status SendSealReply(int sock, ObjectID object_id, int error);
+Status SendSealReply(int sock, ObjectID object_id, PlasmaError error);
 
 Status ReadSealReply(uint8_t* data, size_t size, ObjectID* object_id);
 
@@ -96,19 +99,21 @@ Status SendReleaseRequest(int sock, ObjectID object_id);
 
 Status ReadReleaseRequest(uint8_t* data, size_t size, ObjectID* object_id);
 
-Status SendReleaseReply(int sock, ObjectID object_id, int error);
+Status SendReleaseReply(int sock, ObjectID object_id, PlasmaError error);
 
 Status ReadReleaseReply(uint8_t* data, size_t size, ObjectID* object_id);
 
-/* Plasma Delete message functions. */
+/* Plasma Delete objects message functions. */
 
-Status SendDeleteRequest(int sock, ObjectID object_id);
+Status SendDeleteRequest(int sock, const std::vector<ObjectID>& object_ids);
 
-Status ReadDeleteRequest(uint8_t* data, size_t size, ObjectID* object_id);
+Status ReadDeleteRequest(uint8_t* data, size_t size, std::vector<ObjectID>* object_ids);
 
-Status SendDeleteReply(int sock, ObjectID object_id, int error);
+Status SendDeleteReply(int sock, const std::vector<ObjectID>& object_ids,
+                       const std::vector<PlasmaError>& errors);
 
-Status ReadDeleteReply(uint8_t* data, size_t size, ObjectID* object_id);
+Status ReadDeleteReply(uint8_t* data, size_t size, std::vector<ObjectID>* object_ids,
+                       std::vector<PlasmaError>* errors);
 
 /* Satus messages. */
 

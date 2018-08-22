@@ -15,12 +15,20 @@
 # specific language governing permissions and limitations
 # under the License.
 
+from collections import OrderedDict
 import pickle
 
 import pytest
 import numpy as np
 
 import pyarrow as pa
+
+
+def test_schema_constructor_errors():
+    msg = ("Do not call Schema's constructor directly, use `pyarrow.schema` "
+           "instead")
+    with pytest.raises(TypeError, match=msg):
+        pa.Schema()
 
 
 def test_type_integers():
@@ -190,19 +198,6 @@ def test_from_numpy_dtype():
         pa.from_numpy_dtype('not_convertible_to_dtype')
 
 
-def test_field():
-    t = pa.string()
-    f = pa.field('foo', t)
-
-    assert f.name == 'foo'
-    assert f.nullable
-    assert f.type is t
-    assert repr(f) == "pyarrow.Field<foo: string>"
-
-    f = pa.field('foo', t, False)
-    assert not f.nullable
-
-
 def test_schema():
     fields = [
         pa.field('foo', pa.int32()),
@@ -212,6 +207,7 @@ def test_schema():
     sch = pa.schema(fields)
 
     assert sch.names == ['foo', 'bar', 'baz']
+    assert sch.types == [pa.int32(), pa.string(), pa.list_(pa.int8())]
 
     assert len(sch) == 3
     assert sch[0].name == 'foo'
@@ -226,32 +222,38 @@ baz: list<item: int8>
   child 0, item: int8"""
 
 
-def test_field_empty():
-    f = pa.Field()
-    with pytest.raises(ReferenceError):
-        repr(f)
+def test_schema_from_tuples():
+    fields = [
+        ('foo', pa.int32()),
+        ('bar', pa.string()),
+        ('baz', pa.list_(pa.int8())),
+    ]
+    sch = pa.schema(fields)
+    assert sch.names == ['foo', 'bar', 'baz']
+    assert sch.types == [pa.int32(), pa.string(), pa.list_(pa.int8())]
+    assert len(sch) == 3
+    assert repr(sch) == """\
+foo: int32
+bar: string
+baz: list<item: int8>
+  child 0, item: int8"""
 
 
-def test_field_add_remove_metadata():
-    f0 = pa.field('foo', pa.int32())
-
-    assert f0.metadata is None
-
-    metadata = {b'foo': b'bar', b'pandas': b'badger'}
-
-    f1 = f0.add_metadata(metadata)
-    assert f1.metadata == metadata
-
-    f3 = f1.remove_metadata()
-    assert f3.metadata is None
-
-    # idempotent
-    f4 = f3.remove_metadata()
-    assert f4.metadata is None
-
-    f5 = pa.field('foo', pa.int32(), True, metadata)
-    f6 = f0.add_metadata(metadata)
-    assert f5.equals(f6)
+def test_schema_from_mapping():
+    fields = OrderedDict([
+        ('foo', pa.int32()),
+        ('bar', pa.string()),
+        ('baz', pa.list_(pa.int8())),
+    ])
+    sch = pa.schema(fields)
+    assert sch.names == ['foo', 'bar', 'baz']
+    assert sch.types == [pa.int32(), pa.string(), pa.list_(pa.int8())]
+    assert len(sch) == 3
+    assert repr(sch) == """\
+foo: int32
+bar: string
+baz: list<item: int8>
+  child 0, item: int8"""
 
 
 def test_field_flatten():
@@ -376,7 +378,12 @@ def test_schema_repr_with_dictionaries():
     expected = (
         """\
 one: dictionary<values=string, indices=int16, ordered=0>
-  dictionary: ["foo", "bar", "baz"]
+  dictionary:
+    [
+      "foo",
+      "bar",
+      "baz"
+    ]
 two: int32""")
 
     assert repr(sch) == expected

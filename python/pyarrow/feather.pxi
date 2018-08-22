@@ -75,22 +75,20 @@ cdef class FeatherReader:
     def __cinit__(self):
         pass
 
-    def open(self, source):
+    def open(self, source, c_bool use_memory_map=True):
         cdef shared_ptr[RandomAccessFile] reader
-        get_reader(source, &reader)
+        get_reader(source, use_memory_map, &reader)
 
         with nogil:
             check_status(CFeatherReader.Open(reader, &self.reader))
 
-    property num_rows:
+    @property
+    def num_rows(self):
+        return self.reader.get().num_rows()
 
-        def __get__(self):
-            return self.reader.get().num_rows()
-
-    property num_columns:
-
-        def __get__(self):
-            return self.reader.get().num_columns()
+    @property
+    def num_columns(self):
+        return self.reader.get().num_columns()
 
     def get_column_name(self, int i):
         cdef c_string name = self.reader.get().GetColumnName(i)
@@ -105,6 +103,4 @@ cdef class FeatherReader:
             check_status(self.reader.get()
                          .GetColumn(i, &sp_column))
 
-        cdef Column col = Column()
-        col.init(sp_column)
-        return col
+        return pyarrow_wrap_column(sp_column)

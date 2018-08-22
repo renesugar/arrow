@@ -25,7 +25,7 @@
 
 namespace arrow {
 
-class TestDefaultMemoryPool : public ::arrow::test::TestMemoryPoolBase {
+class TestDefaultMemoryPool : public ::arrow::TestMemoryPoolBase {
  public:
   ::arrow::MemoryPool* memory_pool() override { return ::arrow::default_memory_pool(); }
 };
@@ -52,7 +52,7 @@ TEST(DefaultMemoryPoolDeathTest, FreeLargeMemory) {
 
 #ifndef NDEBUG
   EXPECT_DEATH(pool->Free(data, 120),
-               ".*Check failed: \\(bytes_allocated_\\) >= \\(size\\)");
+               ".*Check failed:.* allocation counter became negative");
 #endif
 
   pool->Free(data, 100);
@@ -60,14 +60,14 @@ TEST(DefaultMemoryPoolDeathTest, FreeLargeMemory) {
 
 TEST(DefaultMemoryPoolDeathTest, MaxMemory) {
   MemoryPool* pool = default_memory_pool();
-
-  uint8_t* data;
-  ASSERT_OK(pool->Allocate(100, &data));
-
+  uint8_t* data1;
   uint8_t* data2;
-  ASSERT_OK(pool->Allocate(100, &data2));
 
-  pool->Free(data, 100);
+  ASSERT_OK(pool->Allocate(100, &data1));
+  ASSERT_OK(pool->Allocate(50, &data2));
+  pool->Free(data2, 50);
+  ASSERT_OK(pool->Allocate(100, &data2));
+  pool->Free(data1, 100);
   pool->Free(data2, 100);
 
   ASSERT_EQ(200, pool->max_memory());
@@ -90,5 +90,26 @@ TEST(LoggingMemoryPool, Logging) {
   pool->Free(data2, 100);
 
   ASSERT_EQ(200, pool->max_memory());
+}
+
+TEST(ProxyMemoryPool, Logging) {
+  MemoryPool* pool = default_memory_pool();
+
+  ProxyMemoryPool pp(pool);
+
+  uint8_t* data;
+  ASSERT_OK(pool->Allocate(100, &data));
+
+  uint8_t* data2;
+  ASSERT_OK(pp.Allocate(300, &data2));
+
+  ASSERT_EQ(400, pool->bytes_allocated());
+  ASSERT_EQ(300, pp.bytes_allocated());
+
+  pool->Free(data, 100);
+  pp.Free(data2, 300);
+
+  ASSERT_EQ(0, pool->bytes_allocated());
+  ASSERT_EQ(0, pp.bytes_allocated());
 }
 }  // namespace arrow

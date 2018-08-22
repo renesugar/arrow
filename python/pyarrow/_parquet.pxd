@@ -102,6 +102,7 @@ cdef extern from "parquet/api/schema.h" namespace "parquet" nogil:
         ParquetCompression_LZO" parquet::Compression::LZO"
         ParquetCompression_BROTLI" parquet::Compression::BROTLI"
         ParquetCompression_LZ4" parquet::Compression::LZ4"
+        ParquetCompression_ZSTD" parquet::Compression::ZSTD"
 
     enum ParquetVersion" parquet::ParquetVersion::type":
         ParquetVersion_V1" parquet::ParquetVersion::PARQUET_1_0"
@@ -133,7 +134,7 @@ cdef extern from "parquet/api/schema.h" namespace "parquet" nogil:
         c_bool Equals(const SchemaDescriptor& other)
         int num_columns()
 
-    cdef c_string FormatStatValue(ParquetType parquet_type, const char* val)
+    cdef c_string FormatStatValue(ParquetType parquet_type, c_string val)
 
 
 cdef extern from "parquet/api/reader.h" namespace "parquet" nogil:

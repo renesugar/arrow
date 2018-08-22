@@ -42,5 +42,16 @@ gchar *garrow_decimal128_to_string_scale(GArrowDecimal128 *decimal,
 gchar *garrow_decimal128_to_string(GArrowDecimal128 *decimal);
 void garrow_decimal128_abs(GArrowDecimal128 *decimal);
 void garrow_decimal128_negate(GArrowDecimal128 *decimal);
+gint64 garrow_decimal128_to_integer(GArrowDecimal128 *decimal);
+GArrowDecimal128 *garrow_decimal128_plus(GArrowDecimal128 *left,
+                                         GArrowDecimal128 *right);
+GArrowDecimal128 *garrow_decimal128_minus(GArrowDecimal128 *left,
+                                          GArrowDecimal128 *right);
+GArrowDecimal128 *garrow_decimal128_multiply(GArrowDecimal128 *left,
+                                             GArrowDecimal128 *right);
+GArrowDecimal128 *garrow_decimal128_divide(GArrowDecimal128 *left,
+                                           GArrowDecimal128 *right,
+                                           GArrowDecimal128 **remainder,
+                                           GError **error);
 
 G_END_DECLS

@@ -32,18 +32,6 @@ using std::string;
 
 namespace arrow {
 
-TEST(TestBuffer, IsMutableFlag) {
-  Buffer buf(nullptr, 0);
-
-  ASSERT_FALSE(buf.is_mutable());
-
-  MutableBuffer mbuf(nullptr, 0);
-  ASSERT_TRUE(mbuf.is_mutable());
-
-  PoolBuffer pbuf;
-  ASSERT_TRUE(pbuf.is_mutable());
-}
-
 TEST(TestBuffer, FromStdString) {
   std::string val = "hello, world";
 
@@ -67,59 +55,6 @@ TEST(TestBuffer, FromStdStringWithMemory) {
   // is still valid to make sure it actually owns its space
   ASSERT_EQ(0, memcmp(buf->data(), expected.c_str(), expected.size()));
   ASSERT_EQ(static_cast<int64_t>(expected.size()), buf->size());
-}
-
-TEST(TestBuffer, Resize) {
-  PoolBuffer buf;
-
-  ASSERT_EQ(0, buf.size());
-  ASSERT_OK(buf.Resize(100));
-  ASSERT_EQ(100, buf.size());
-  ASSERT_OK(buf.Resize(200));
-  ASSERT_EQ(200, buf.size());
-
-  // Make it smaller, too
-  ASSERT_OK(buf.Resize(50, true));
-  ASSERT_EQ(50, buf.size());
-  // We have actually shrunken in size
-  // The spec requires that capacity is a multiple of 64
-  ASSERT_EQ(64, buf.capacity());
-
-  // Resize to a larger capacity again to test shrink_to_fit = false
-  ASSERT_OK(buf.Resize(100));
-  ASSERT_EQ(128, buf.capacity());
-  ASSERT_OK(buf.Resize(50, false));
-  ASSERT_EQ(128, buf.capacity());
-}
-
-TEST(TestBuffer, TypedResize) {
-  PoolBuffer buf;
-
-  ASSERT_EQ(0, buf.size());
-  ASSERT_OK(buf.TypedResize<double>(100));
-  ASSERT_EQ(800, buf.size());
-  ASSERT_OK(buf.TypedResize<double>(200));
-  ASSERT_EQ(1600, buf.size());
-
-  ASSERT_OK(buf.TypedResize<double>(50, true));
-  ASSERT_EQ(400, buf.size());
-  ASSERT_EQ(448, buf.capacity());
-
-  ASSERT_OK(buf.TypedResize<double>(100));
-  ASSERT_EQ(832, buf.capacity());
-  ASSERT_OK(buf.TypedResize<double>(50, false));
-  ASSERT_EQ(832, buf.capacity());
-}
-
-TEST(TestBuffer, ResizeOOM) {
-// This test doesn't play nice with AddressSanitizer
-#ifndef ADDRESS_SANITIZER
-  // realloc fails, even though there may be no explicit limit
-  PoolBuffer buf;
-  ASSERT_OK(buf.Resize(100));
-  int64_t to_alloc = std::numeric_limits<int64_t>::max();
-  ASSERT_RAISES(OutOfMemory, buf.Resize(to_alloc));
-#endif
 }
 
 TEST(TestBuffer, EqualsWithSameContent) {
@@ -178,6 +113,9 @@ TEST(TestBuffer, Copy) {
 
   Buffer expected(data + 5, 4);
   ASSERT_TRUE(out->Equals(expected));
+  // assert the padding is zeroed
+  std::vector<uint8_t> zeros(out->capacity() - out->size());
+  ASSERT_EQ(0, memcmp(out->data() + out->size(), zeros.data(), zeros.size()));
 }
 
 TEST(TestBuffer, SliceBuffer) {
@@ -199,7 +137,7 @@ TEST(TestBuffer, SliceMutableBuffer) {
   auto data = reinterpret_cast<const uint8_t*>(data_str.c_str());
 
   std::shared_ptr<Buffer> buffer;
-  ASSERT_OK(AllocateBuffer(default_memory_pool(), 50, &buffer));
+  ASSERT_OK(AllocateBuffer(50, &buffer));
 
   memcpy(buffer->mutable_data(), data, data_str.size());
 
@@ -234,6 +172,83 @@ TEST(TestBufferBuilder, ResizeReserve) {
   // Reserve elements
   ASSERT_OK(builder.Reserve(60));
   ASSERT_EQ(128, builder.capacity());
+}
+
+template <typename T>
+class TypedTestBuffer : public ::testing::Test {};
+
+using BufferPtrs =
+    ::testing::Types<std::shared_ptr<ResizableBuffer>, std::unique_ptr<ResizableBuffer>>;
+
+TYPED_TEST_CASE(TypedTestBuffer, BufferPtrs);
+
+TYPED_TEST(TypedTestBuffer, IsMutableFlag) {
+  Buffer buf(nullptr, 0);
+
+  ASSERT_FALSE(buf.is_mutable());
+
+  MutableBuffer mbuf(nullptr, 0);
+  ASSERT_TRUE(mbuf.is_mutable());
+
+  TypeParam pool_buf;
+  ASSERT_OK(AllocateResizableBuffer(0, &pool_buf));
+  ASSERT_TRUE(pool_buf->is_mutable());
+}
+
+TYPED_TEST(TypedTestBuffer, Resize) {
+  TypeParam buf;
+  ASSERT_OK(AllocateResizableBuffer(0, &buf));
+
+  ASSERT_EQ(0, buf->size());
+  ASSERT_OK(buf->Resize(100));
+  ASSERT_EQ(100, buf->size());
+  ASSERT_OK(buf->Resize(200));
+  ASSERT_EQ(200, buf->size());
+
+  // Make it smaller, too
+  ASSERT_OK(buf->Resize(50, true));
+  ASSERT_EQ(50, buf->size());
+  // We have actually shrunken in size
+  // The spec requires that capacity is a multiple of 64
+  ASSERT_EQ(64, buf->capacity());
+
+  // Resize to a larger capacity again to test shrink_to_fit = false
+  ASSERT_OK(buf->Resize(100));
+  ASSERT_EQ(128, buf->capacity());
+  ASSERT_OK(buf->Resize(50, false));
+  ASSERT_EQ(128, buf->capacity());
+}
+
+TYPED_TEST(TypedTestBuffer, TypedResize) {
+  TypeParam buf;
+  ASSERT_OK(AllocateResizableBuffer(0, &buf));
+
+  ASSERT_EQ(0, buf->size());
+  ASSERT_OK(buf->template TypedResize<double>(100));
+  ASSERT_EQ(800, buf->size());
+  ASSERT_OK(buf->template TypedResize<double>(200));
+  ASSERT_EQ(1600, buf->size());
+
+  ASSERT_OK(buf->template TypedResize<double>(50, true));
+  ASSERT_EQ(400, buf->size());
+  ASSERT_EQ(448, buf->capacity());
+
+  ASSERT_OK(buf->template TypedResize<double>(100));
+  ASSERT_EQ(832, buf->capacity());
+  ASSERT_OK(buf->template TypedResize<double>(50, false));
+  ASSERT_EQ(832, buf->capacity());
+}
+
+TYPED_TEST(TypedTestBuffer, ResizeOOM) {
+// This test doesn't play nice with AddressSanitizer
+#ifndef ADDRESS_SANITIZER
+  // realloc fails, even though there may be no explicit limit
+  TypeParam buf;
+  ASSERT_OK(AllocateResizableBuffer(0, &buf));
+  ASSERT_OK(buf->Resize(100));
+  int64_t to_alloc = std::numeric_limits<int64_t>::max();
+  ASSERT_RAISES(OutOfMemory, buf->Resize(to_alloc));
+#endif
 }
 
 }  // namespace arrow

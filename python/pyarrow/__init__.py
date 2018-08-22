@@ -17,31 +17,38 @@
 
 # flake8: noqa
 
-from pkg_resources import get_distribution, DistributionNotFound
-try:
-    __version__ = get_distribution(__name__).version
-except DistributionNotFound:
-   # package is not installed
-    try:
-        # This code is duplicated from setup.py to avoid a dependency on each
-        # other.
-        def parse_version(root):
-            from setuptools_scm import version_from_scm
-            import setuptools_scm.git
-            describe = (setuptools_scm.git.DEFAULT_DESCRIBE +
-                        " --match 'apache-arrow-[0-9]*'")
-            # Strip catchall from the commandline
-            describe = describe.replace("--match *.*", "")
-            version = setuptools_scm.git.parse(root, describe)
-            if not version:
-                return version_from_scm(root)
-            else:
-                return version
+import os as _os
+import sys as _sys
 
+try:
+    from ._generated_version import version as __version__
+except ImportError:
+    # Package is not installed, parse git tag at runtime
+    try:
         import setuptools_scm
-        __version__ = setuptools_scm.get_version('../', parse=parse_version)
-    except (ImportError, LookupError):
+        # Code duplicated from setup.py to avoid a dependency on each other
+        def parse_git(root, **kwargs):
+            """
+            Parse function for setuptools_scm that ignores tags for non-C++
+            subprojects, e.g. apache-arrow-js-XXX tags.
+            """
+            from setuptools_scm.git import parse
+            kwargs['describe_command'] = \
+                "git describe --dirty --tags --long --match 'apache-arrow-[0-9].*'"
+            return parse(root, **kwargs)
+        __version__ = setuptools_scm.get_version('../',
+                                                 parse=parse_git)
+    except ImportError:
         __version__ = None
+
+
+import pyarrow.compat as compat
+
+# Workaround for https://issues.apache.org/jira/browse/ARROW-2657
+# and https://issues.apache.org/jira/browse/ARROW-2920
+if _sys.platform in ('linux', 'linux2'):
+    compat.import_tensorflow_extension()
+    compat.import_pytorch_extension()
 
 
 from pyarrow.lib import cpu_count, set_cpu_count
@@ -53,7 +60,7 @@ from pyarrow.lib import (null, bool_,
                          binary, string, decimal128,
                          list_, struct, union, dictionary, field,
                          type_for_alias,
-                         DataType, NAType,
+                         DataType,
                          Field,
                          Schema,
                          schema,
@@ -74,23 +81,22 @@ from pyarrow.lib import (null, bool_,
                          Date32Array, Date64Array,
                          TimestampArray, Time32Array, Time64Array,
                          Decimal128Array, StructArray,
-                         ArrayValue, Scalar, NA,
+                         ArrayValue, Scalar, NA, _NULL as NULL,
                          BooleanValue,
                          Int8Value, Int16Value, Int32Value, Int64Value,
                          UInt8Value, UInt16Value, UInt32Value, UInt64Value,
                          HalfFloatValue, FloatValue, DoubleValue, ListValue,
                          BinaryValue, StringValue, FixedSizeBinaryValue,
-                         DecimalValue,
-                         Date32Value, Date64Value, TimestampValue)
-
-# ARROW-1683: Remove after 0.8.0?
-from pyarrow.lib import TimestampType
+                         DecimalValue, UnionValue, StructValue, DictionaryValue,
+                         Date32Value, Date64Value,
+                         Time32Value, Time64Value,
+                         TimestampValue)
 
 # Buffers, allocation
 from pyarrow.lib import (Buffer, ResizableBuffer, foreign_buffer, py_buffer,
                          compress, decompress, allocate_buffer)
 
-from pyarrow.lib import (MemoryPool, total_allocated_bytes,
+from pyarrow.lib import (MemoryPool, ProxyMemoryPool, total_allocated_bytes,
                          set_memory_pool, default_memory_pool,
                          log_memory_allocations)
 
@@ -155,11 +161,10 @@ def _plasma_store_entry_point():
     from the command line and will start the plasma_store executable with the
     given arguments.
     """
-    import os
     import pyarrow
-    import sys
-    plasma_store_executable = os.path.join(pyarrow.__path__[0], "plasma_store")
-    os.execv(plasma_store_executable, sys.argv)
+    plasma_store_executable = _os.path.join(pyarrow.__path__[0],
+                                            "plasma_store_server")
+    _os.execv(plasma_store_executable, _sys.argv)
 
 # ----------------------------------------------------------------------
 # Deprecations
@@ -177,8 +182,7 @@ def get_include():
     Return absolute path to directory containing Arrow C++ include
     headers. Similar to numpy.get_include
     """
-    import os
-    return os.path.join(os.path.dirname(__file__), 'include')
+    return _os.path.join(_os.path.dirname(__file__), 'include')
 
 
 def get_libraries():
@@ -194,18 +198,34 @@ def get_library_dirs():
     Return lists of directories likely to contain Arrow C++ libraries for
     linking C or Cython extensions using pyarrow
     """
-    import os
-    import sys
-    package_cwd = os.path.dirname(__file__)
+    package_cwd = _os.path.dirname(__file__)
 
     library_dirs = [package_cwd]
 
-    if sys.platform == 'win32':
+    # Search library paths via pkg-config. This is necessary if the user
+    # installed libarrow and the other shared libraries manually and they
+    # are not shipped inside the pyarrow package (see also ARROW-2976).
+    from subprocess import call, PIPE, Popen
+    pkg_config_executable = _os.environ.get('PKG_CONFIG', None) or 'pkg-config'
+    for package in ["arrow", "plasma", "arrow_python"]:
+        cmd = '{0} --exists {1}'.format(pkg_config_executable, package).split()
+        try:
+            if call(cmd) == 0:
+                cmd = [pkg_config_executable, "--libs-only-L", package]
+                proc = Popen(cmd, stdout=PIPE, stderr=PIPE)
+                out, err = proc.communicate()
+                library_dir = out.rstrip().decode('utf-8')[2:] # strip "-L"
+                if library_dir not in library_dirs:
+                    library_dirs.append(library_dir)
+        except FileNotFoundError:
+            pass
+
+    if _sys.platform == 'win32':
         # TODO(wesm): Is this necessary, or does setuptools within a conda
         # installation add Library\lib to the linker path for MSVC?
-        site_packages, _ = os.path.split(package_cwd)
-        python_base_install, _ = os.path.split(site_packages)
-        library_dirs.append(os.path.join(python_base_install,
-                                         'Library', 'lib'))
+        site_packages, _ = _os.path.split(package_cwd)
+        python_base_install, _ = _os.path.split(site_packages)
+        library_dirs.append(_os.path.join(python_base_install,
+                                          'Library', 'lib'))
 
     return library_dirs
