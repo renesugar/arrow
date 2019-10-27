@@ -17,6 +17,10 @@
 
 module Helper
   module Buildable
+    def build_null_array(values)
+      build_array(Arrow::NullArrayBuilder.new, values)
+    end
+
     def build_boolean_array(values)
       build_array(Arrow::BooleanArrayBuilder.new, values)
     end
@@ -97,27 +101,41 @@ module Helper
       build_array(Arrow::BinaryArrayBuilder.new, values)
     end
 
+    def build_large_binary_array(values)
+      build_array(Arrow::LargeBinaryArrayBuilder.new, values)
+    end
+
     def build_string_array(values)
       build_array(Arrow::StringArrayBuilder.new, values)
     end
 
-    def build_list_array(value_data_type, values_list)
-      value_field = Arrow::Field.new("value", value_data_type)
+    def build_large_string_array(values)
+      build_array(Arrow::LargeStringArrayBuilder.new, values)
+    end
+
+    def build_list_array(value_data_type, values_list, field_name: "value")
+      value_field = Arrow::Field.new(field_name, value_data_type)
       data_type = Arrow::ListDataType.new(value_field)
       builder = Arrow::ListArrayBuilder.new(data_type)
-      value_builder = builder.value_builder
       values_list.each do |values|
         if values.nil?
           builder.append_null
         else
-          builder.append
-          values.each do |value|
-            if value.nil?
-              value_builder.append_null
-            else
-              value_builder.append(value)
-            end
-          end
+          append_to_builder(builder, values)
+        end
+      end
+      builder.finish
+    end
+
+    def build_large_list_array(value_data_type, values_list, field_name: "value")
+      value_field = Arrow::Field.new(field_name, value_data_type)
+      data_type = Arrow::LargeListDataType.new(value_field)
+      builder = Arrow::LargeListArrayBuilder.new(data_type)
+      values_list.each do |values|
+        if values.nil?
+          builder.append_null
+        else
+          append_to_builder(builder, values)
         end
       end
       builder.finish
@@ -130,30 +148,46 @@ module Helper
         if struct.nil?
           builder.append_null
         else
-          builder.append
-          struct.each do |name, value|
-            field_builder_index = fields.index {|field| field.name == name}
-            field_builder = builder.get_field_builder(field_builder_index)
-            if value.nil?
-              field_builder.append_null
-            else
-              field_builder.append(value)
-            end
-          end
+          append_to_builder(builder, struct)
         end
       end
       builder.finish
     end
 
-    def build_table(arrays)
-      fields = arrays.collect do |name, array|
-        Arrow::Field.new(name, array.value_data_type)
+    def append_to_builder(builder, value)
+      if value.nil?
+        builder.append_null
+      else
+        data_type = builder.value_data_type
+        case data_type
+        when Arrow::ListDataType, Arrow::LargeListDataType
+          builder.append_value
+          value_builder = builder.value_builder
+          value.each do |v|
+            append_to_builder(value_builder, v)
+          end
+        when Arrow::StructDataType
+          builder.append_value
+          value.each do |name, v|
+            field_index = data_type.get_field_index(name)
+            field_builder = builder.get_field_builder(field_index)
+            append_to_builder(field_builder, v)
+          end
+        else
+          builder.append_value(value)
+        end
+      end
+    end
+
+    def build_table(columns)
+      fields = []
+      arrays = []
+      columns.each do |name, array|
+        fields << Arrow::Field.new(name, array.value_data_type)
+        arrays << array
       end
       schema = Arrow::Schema.new(fields)
-      columns = arrays.collect.with_index do |(_name, array), i|
-        Arrow::Column.new(fields[i], array)
-      end
-      Arrow::Table.new(schema, columns)
+      Arrow::Table.new(schema, arrays)
     end
 
     def build_record_batch(arrays)
@@ -170,8 +204,10 @@ module Helper
       values.each do |value|
         if value.nil?
           builder.append_null
+        elsif builder.respond_to?(:append_string)
+          builder.append_string(value)
         else
-          builder.append(value)
+          builder.append_value(value)
         end
       end
       builder.finish

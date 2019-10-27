@@ -23,14 +23,12 @@
 #include <string>
 #include <vector>
 
+#include "arrow/type_fwd.h"
 #include "arrow/util/macros.h"
+#include "arrow/util/string_view.h"
 #include "arrow/util/visibility.h"
 
 namespace arrow {
-
-class Buffer;
-class Status;
-
 namespace io {
 
 struct FileMode {
@@ -66,8 +64,31 @@ class ARROW_EXPORT FileSystem {
 class ARROW_EXPORT FileInterface {
  public:
   virtual ~FileInterface() = 0;
+
+  /// \brief Close the stream cleanly
+  ///
+  /// For writable streams, this will attempt to flush any pending data
+  /// before releasing the underlying resource.
+  ///
+  /// After Close() is called, closed() returns true and the stream is not
+  /// available for further operations.
   virtual Status Close() = 0;
+
+  /// \brief Close the stream abruptly
+  ///
+  /// This method does not guarantee that any pending data is flushed.
+  /// It merely releases any underlying resource used by the stream for
+  /// its operation.
+  ///
+  /// After Abort() is called, closed() returns true and the stream is not
+  /// available for further operations.
+  virtual Status Abort();
+
+  /// \brief Return the position in this stream
   virtual Status Tell(int64_t* position) const = 0;
+
+  /// \brief Return whether the stream is closed
+  virtual bool closed() const = 0;
 
   FileMode::type mode() const { return mode_; }
 
@@ -90,7 +111,20 @@ class ARROW_EXPORT Writable {
  public:
   virtual ~Writable() = default;
 
+  /// \brief Write the given data to the stream
+  ///
+  /// This method always processes the bytes in full.  Depending on the
+  /// semantics of the stream, the data may be written out immediately,
+  /// held in a buffer, or written asynchronously.  In the case where
+  /// the stream buffers the data, it will be copied.  To avoid potentially
+  /// large copies, use the Write variant that takes an owned Buffer.
   virtual Status Write(const void* data, int64_t nbytes) = 0;
+
+  /// \brief Write the given data to the stream
+  ///
+  /// Since the Buffer owns its memory, this method can avoid a copy if
+  /// buffering is required.  See Write(const void*, int64_t) for details.
+  virtual Status Write(const std::shared_ptr<Buffer>& data);
 
   /// \brief Flush buffered bytes, if any
   virtual Status Flush();
@@ -113,7 +147,29 @@ class ARROW_EXPORT OutputStream : virtual public FileInterface, public Writable 
   OutputStream() = default;
 };
 
-class ARROW_EXPORT InputStream : virtual public FileInterface, public Readable {
+class ARROW_EXPORT InputStream : virtual public FileInterface, virtual public Readable {
+ public:
+  /// \brief Advance or skip stream indicated number of bytes
+  /// \param[in] nbytes the number to move forward
+  /// \return Status
+  Status Advance(int64_t nbytes);
+
+  /// \brief Return zero-copy string_view to upcoming bytes.
+  ///
+  /// Do not modify the stream position.  The view becomes invalid after
+  /// any operation on the stream.  May trigger buffering if the requested
+  /// size is larger than the number of buffered bytes.
+  ///
+  /// May return NotImplemented on streams that don't support it.
+  ///
+  /// \param[in] nbytes the maximum number of bytes to see
+  /// \param[out] out the returned arrow::util::string_view
+  /// \return Status
+  virtual Status Peek(int64_t nbytes, util::string_view* out);
+
+  /// \brief Return true if InputStream is capable of zero copy Buffer reads
+  virtual bool supports_zero_copy() const;
+
  protected:
   InputStream() = default;
 };
@@ -123,60 +179,71 @@ class ARROW_EXPORT RandomAccessFile : public InputStream, public Seekable {
   /// Necessary because we hold a std::unique_ptr
   ~RandomAccessFile() override;
 
+  /// \brief Create an isolated InputStream that reads a segment of a
+  /// RandomAccessFile. Multiple such stream can be created and used
+  /// independently without interference
+  /// \param[in] file a file instance
+  /// \param[in] file_offset the starting position in the file
+  /// \param[in] nbytes the extent of bytes to read. The file should have
+  /// sufficient bytes available
+  static std::shared_ptr<InputStream> GetStream(std::shared_ptr<RandomAccessFile> file,
+                                                int64_t file_offset, int64_t nbytes);
+
   virtual Status GetSize(int64_t* size) = 0;
 
-  virtual bool supports_zero_copy() const = 0;
-
-  /// \brief Read nbytes at position, provide default implementations using Read(...), but
-  /// can be overridden. Default implementation is thread-safe.  It is unspecified
-  /// whether this method updates the file position or not.
-  ///
-  /// \note Child classes must explicitly call this implementation or provide their own.
+  /// \brief Read nbytes at position, provide default implementations using
+  /// Read(...), but can be overridden. The default implementation is
+  /// thread-safe. It is unspecified whether this method updates the file
+  /// position or not.
   ///
   /// \param[in] position Where to read bytes from
   /// \param[in] nbytes The number of bytes to read
   /// \param[out] bytes_read The number of bytes read
   /// \param[out] out The buffer to read bytes into
   /// \return Status
-  virtual Status ReadAt(int64_t position, int64_t nbytes, int64_t* bytes_read,
-                        void* out) = 0;
+  virtual Status ReadAt(int64_t position, int64_t nbytes, int64_t* bytes_read, void* out);
 
-  /// \brief Read nbytes at position, provide default implementations using Read(...), but
-  /// can be overridden. Default implementation is thread-safe.  It is unspecified
-  /// whether this method updates the file position or not.
-  ///
-  /// \note Child classes must explicitly call this implementation or provide their own.
+  /// \brief Read nbytes at position, provide default implementations using
+  /// Read(...), but can be overridden. The default implementation is
+  /// thread-safe. It is unspecified whether this method updates the file
+  /// position or not.
   ///
   /// \param[in] position Where to read bytes from
   /// \param[in] nbytes The number of bytes to read
   /// \param[out] out The buffer to read bytes into. The number of bytes read can be
   /// retrieved by calling Buffer::size().
-  virtual Status ReadAt(int64_t position, int64_t nbytes,
-                        std::shared_ptr<Buffer>* out) = 0;
+  virtual Status ReadAt(int64_t position, int64_t nbytes, std::shared_ptr<Buffer>* out);
 
  protected:
   RandomAccessFile();
 
  private:
   struct ARROW_NO_EXPORT RandomAccessFileImpl;
-  std::unique_ptr<RandomAccessFileImpl> impl_;
+  std::unique_ptr<RandomAccessFileImpl> interface_impl_;
 };
 
-class ARROW_EXPORT WriteableFile : public OutputStream, public Seekable {
+class ARROW_EXPORT WritableFile : public OutputStream, public Seekable {
  public:
   virtual Status WriteAt(int64_t position, const void* data, int64_t nbytes) = 0;
 
  protected:
-  WriteableFile() = default;
+  WritableFile() = default;
 };
 
-class ARROW_EXPORT ReadWriteFileInterface : public RandomAccessFile,
-                                            public WriteableFile {
+class ARROW_EXPORT ReadWriteFileInterface : public RandomAccessFile, public WritableFile {
  protected:
   ReadWriteFileInterface() { RandomAccessFile::set_mode(FileMode::READWRITE); }
 };
 
-using ReadableFileInterface = RandomAccessFile;
+/// \brief Return an iterator on an input stream
+///
+/// The iterator yields a fixed-size block on each Next() call, except the
+/// last block in the stream which may be smaller.
+/// Once the end of stream is reached, Next() returns nullptr
+/// (unlike InputStream::Read() which returns an empty buffer).
+ARROW_EXPORT
+Status MakeInputStreamIterator(std::shared_ptr<InputStream> stream, int64_t block_size,
+                               Iterator<std::shared_ptr<Buffer>>* out);
 
 }  // namespace io
 }  // namespace arrow

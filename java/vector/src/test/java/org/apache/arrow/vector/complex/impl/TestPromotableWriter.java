@@ -1,13 +1,12 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,18 +23,21 @@ import static org.junit.Assert.assertTrue;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.DirtyRootAllocator;
+import org.apache.arrow.vector.complex.ListVector;
 import org.apache.arrow.vector.complex.NonNullableStructVector;
 import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.complex.UnionVector;
 import org.apache.arrow.vector.complex.writer.BaseWriter.StructWriter;
+import org.apache.arrow.vector.types.Types;
 import org.apache.arrow.vector.types.pojo.ArrowType.ArrowTypeID;
 import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 
 public class TestPromotableWriter {
-  private final static String EMPTY_SCHEMA_PATH = "";
+  private static final String EMPTY_SCHEMA_PATH = "";
 
   private BufferAllocator allocator;
 
@@ -110,8 +112,56 @@ public class TestPromotableWriter {
 
       Field childField1 = container.getField().getChildren().get(0).getChildren().get(0);
       Field childField2 = container.getField().getChildren().get(0).getChildren().get(1);
-      assertEquals("Child field should be union type: " + childField1.getName(), ArrowTypeID.Union, childField1.getType().getTypeID());
-      assertEquals("Child field should be decimal type: " + childField2.getName(), ArrowTypeID.Decimal, childField2.getType().getTypeID());
+      assertEquals("Child field should be union type: " +
+          childField1.getName(), ArrowTypeID.Union, childField1.getType().getTypeID());
+      assertEquals("Child field should be decimal type: " +
+          childField2.getName(), ArrowTypeID.Decimal, childField2.getType().getTypeID());
+    }
+  }
+
+  @Test
+  public void testNoPromoteToUnionWithNull() throws Exception {
+
+    try (final NonNullableStructVector container = NonNullableStructVector.empty(EMPTY_SCHEMA_PATH, allocator);
+         final StructVector v = container.addOrGetStruct("test");
+         final PromotableWriter writer = new PromotableWriter(v, container)) {
+
+      container.allocateNew();
+
+      writer.start();
+      writer.list("list").startList();
+      writer.list("list").endList();
+      writer.end();
+
+      FieldType childTypeOfListInContainer = container.getField().getChildren().get(0).getChildren().get(0)
+              .getChildren().get(0).getFieldType();
+
+
+      // create a listvector with same type as list in container to, say, hold a copy
+      // this will be a nullvector
+      ListVector lv = ListVector.empty("name", allocator);
+      lv.addOrGetVector(childTypeOfListInContainer);
+      assertEquals(childTypeOfListInContainer.getType(), Types.MinorType.NULL.getType());
+      assertEquals(lv.getChildrenFromFields().get(0).getMinorType().getType(), Types.MinorType.NULL.getType());
+
+      writer.start();
+      writer.list("list").startList();
+      writer.list("list").float4().writeFloat4(1.36f);
+      writer.list("list").endList();
+      writer.end();
+
+      container.setValueCount(2);
+
+      childTypeOfListInContainer = container.getField().getChildren().get(0).getChildren().get(0)
+              .getChildren().get(0).getFieldType();
+
+      // repeat but now the type in container has been changed from null to float
+      // we expect same behaviour from listvector
+      lv.addOrGetVector(childTypeOfListInContainer);
+      assertEquals(childTypeOfListInContainer.getType(), Types.MinorType.FLOAT4.getType());
+      assertEquals(lv.getChildrenFromFields().get(0).getMinorType().getType(), Types.MinorType.FLOAT4.getType());
+
+      lv.close();
     }
   }
 }

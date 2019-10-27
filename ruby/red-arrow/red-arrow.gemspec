@@ -17,7 +17,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-require_relative "version"
+require_relative "lib/arrow/version"
 
 Gem::Specification.new do |spec|
   spec.name = "red-arrow"
@@ -25,9 +25,9 @@ Gem::Specification.new do |spec|
     Arrow::Version::MAJOR.to_s,
     Arrow::Version::MINOR.to_s,
     Arrow::Version::MICRO.to_s,
-    # "beta1",
+    Arrow::Version::TAG,
   ]
-  spec.version = version_components.join(".")
+  spec.version = version_components.compact.join(".")
   spec.homepage = "https://arrow.apache.org/"
   spec.authors = ["Apache Arrow Developers"]
   spec.email = ["dev@arrow.apache.org"]
@@ -39,17 +39,27 @@ Gem::Specification.new do |spec|
   spec.license = "Apache-2.0"
   spec.files = ["README.md", "Rakefile", "Gemfile", "#{spec.name}.gemspec"]
   spec.files += ["LICENSE.txt", "NOTICE.txt"]
+  spec.files += Dir.glob("ext/**/*.{cpp,hpp,rb}")
   spec.files += Dir.glob("lib/**/*.rb")
   spec.files += Dir.glob("image/*.*")
   spec.files += Dir.glob("doc/text/*")
   spec.test_files += Dir.glob("test/**/*")
-  spec.extensions = ["dependency-check/Rakefile"]
+  spec.extensions = ["ext/arrow/extconf.rb"]
 
-  spec.add_runtime_dependency("gobject-introspection", ">= 3.1.1")
-  spec.add_runtime_dependency("pkg-config")
+  spec.add_runtime_dependency("extpp", ">= 0.0.7")
+  spec.add_runtime_dependency("gio2", ">= 3.3.6")
   spec.add_runtime_dependency("native-package-installer")
+  spec.add_runtime_dependency("pkg-config")
 
+  spec.add_development_dependency("benchmark-driver")
   spec.add_development_dependency("bundler")
+  spec.add_development_dependency("faker")
   spec.add_development_dependency("rake")
+  spec.add_development_dependency("redcarpet")
   spec.add_development_dependency("test-unit")
+  spec.add_development_dependency("yard")
+
+  required_msys2_package_version = version_components[0, 3].join(".")
+  spec.metadata["msys2_mingw_dependencies"] =
+    "arrow>=#{required_msys2_package_version}"
 end

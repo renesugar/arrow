@@ -15,38 +15,76 @@
 # specific language governing permissions and limitations
 # under the License.
 
-FROM debian:stretch
+ARG FROM=debian:stretch
+FROM ${FROM}
 
-ENV DEBIAN_FRONTEND noninteractive
+COPY qemu-* /usr/bin/
+
+RUN \
+  echo "debconf debconf/frontend select Noninteractive" | \
+    debconf-set-selections
 
 ARG DEBUG
 
 RUN sed -i'' -e 's/main$/main contrib non-free/g' /etc/apt/sources.list
+RUN \
+  echo "deb http://deb.debian.org/debian stretch-backports main" > \
+    /etc/apt/sources.list.d/backports.list
 
 RUN \
   quiet=$([ "${DEBUG}" = "yes" ] || echo "-qq") && \
   apt update ${quiet} && \
   apt install -y -V ${quiet} \
-    autoconf-archive \
+    gnupg \
+    wget && \
+  wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | apt-key add - && \
+  echo "deb http://apt.llvm.org/stretch/ llvm-toolchain-stretch-7 main" > \
+    /etc/apt/sources.list.d/llvm.list && \
+  apt update ${quiet} && \
+  apt install -y -V ${quiet} \
+    bison \
     build-essential \
+    clang-7 \
     cmake \
-    debhelper\
     devscripts \
+    flex \
     git \
     gtk-doc-tools \
     libboost-filesystem-dev \
     libboost-regex-dev \
     libboost-system-dev \
+    libbrotli-dev \
+    libc-ares-dev \
+    libdouble-conversion-dev \
     libgirepository1.0-dev \
     libglib2.0-doc \
-    libjemalloc-dev \
+    libgoogle-glog-dev \
+    liblz4-dev \
+    libre2-dev \
+    libsnappy-dev \
+    libssl-dev \
+    libzstd-dev \
+    lsb-release \
+    ninja-build \
+    pkg-config \
+    python3-dev \
+    python3-numpy \
+    python3-pip \
+    tzdata && \
+  apt install -y -V -t stretch-backports ${quiet} \
+    debhelper \
+    libgmock-dev \
+    libgrpc++-dev \
+    libgtest-dev \
     libprotobuf-dev \
     libprotoc-dev \
-    lsb-release \
-    nvidia-cuda-toolkit \
-    pkg-config \
     protobuf-compiler \
-    python3-dev \
-    python3-numpy && \
+    protobuf-compiler-grpc \
+    rapidjson-dev && \
+  if apt list | grep '^nvidia-cuda-toolkit/'; then \
+    apt install -y -V -t stretch-backports ${quiet} nvidia-cuda-toolkit; \
+  fi && \
+  pip3 install --upgrade meson && \
+  ln -s /usr/local/bin/meson /usr/bin/ && \
   apt clean && \
   rm -rf /var/lib/apt/lists/*

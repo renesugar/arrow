@@ -34,7 +34,7 @@ cdef class FeatherWriter:
         self.num_rows = -1
 
     def open(self, object dest):
-        cdef shared_ptr[OutputStream] sink
+        cdef shared_ptr[COutputStream] sink
         get_writer(dest, &sink)
 
         with nogil:
@@ -76,7 +76,7 @@ cdef class FeatherReader:
         pass
 
     def open(self, source, c_bool use_memory_map=True):
-        cdef shared_ptr[RandomAccessFile] reader
+        cdef shared_ptr[CRandomAccessFile] reader
         get_reader(source, use_memory_map, &reader)
 
         with nogil:
@@ -98,9 +98,43 @@ cdef class FeatherReader:
         if i < 0 or i >= self.num_columns:
             raise IndexError(i)
 
-        cdef shared_ptr[CColumn] sp_column
+        cdef shared_ptr[CChunkedArray] sp_chunked_array
         with nogil:
             check_status(self.reader.get()
-                         .GetColumn(i, &sp_column))
+                         .GetColumn(i, &sp_chunked_array))
 
-        return pyarrow_wrap_column(sp_column)
+        return pyarrow_wrap_chunked_array(sp_chunked_array)
+
+    def _read(self):
+        cdef shared_ptr[CTable] sp_table
+        with nogil:
+            check_status(self.reader.get()
+                         .Read(&sp_table))
+
+        return pyarrow_wrap_table(sp_table)
+
+    def _read_indices(self, indices):
+        cdef:
+            shared_ptr[CTable] sp_table
+            vector[int] c_indices
+
+        for index in indices:
+            c_indices.push_back(index)
+        with nogil:
+            check_status(self.reader.get()
+                         .Read(c_indices, &sp_table))
+
+        return pyarrow_wrap_table(sp_table)
+
+    def _read_names(self, names):
+        cdef:
+            shared_ptr[CTable] sp_table
+            vector[c_string] c_names
+
+        for name in names:
+            c_names.push_back(tobytes(name))
+        with nogil:
+            check_status(self.reader.get()
+                         .Read(c_names, &sp_table))
+
+        return pyarrow_wrap_table(sp_table)

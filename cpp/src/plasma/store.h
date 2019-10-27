@@ -27,11 +27,21 @@
 
 #include "plasma/common.h"
 #include "plasma/events.h"
-#include "plasma/eviction_policy.h"
+#include "plasma/external_store.h"
 #include "plasma/plasma.h"
 #include "plasma/protocol.h"
+#include "plasma/quota_aware_policy.h"
+
+namespace arrow {
+class Status;
+}  // namespace arrow
 
 namespace plasma {
+
+namespace flatbuf {
+struct ObjectInfoT;
+enum class PlasmaError;
+}  // namespace flatbuf
 
 using flatbuf::ObjectInfoT;
 using flatbuf::PlasmaError;
@@ -44,28 +54,14 @@ struct NotificationQueue {
   std::deque<std::unique_ptr<uint8_t[]>> object_notifications;
 };
 
-/// Contains all information that is associated with a Plasma store client.
-struct Client {
-  explicit Client(int fd);
-
-  /// The file descriptor used to communicate with the client.
-  int fd;
-
-  /// Object ids that are used by this client.
-  std::unordered_set<ObjectID> object_ids;
-
-  /// The file descriptor used to push notifications to client. This is only valid
-  /// if client subscribes to plasma store. -1 indicates invalid.
-  int notification_fd;
-};
-
 class PlasmaStore {
  public:
   using NotificationMap = std::unordered_map<int, NotificationQueue>;
 
   // TODO: PascalCase PlasmaStore methods.
-  PlasmaStore(EventLoop* loop, int64_t system_memory, std::string directory,
-              bool hugetlbfs_enabled);
+  PlasmaStore(EventLoop* loop, std::string directory, bool hugepages_enabled,
+              const std::string& socket_name,
+              std::shared_ptr<ExternalStore> external_store);
 
   ~PlasmaStore();
 
@@ -115,11 +111,10 @@ class PlasmaStore {
   ///  - PlasmaError::ObjectInUse, if the object is in use.
   PlasmaError DeleteObject(ObjectID& object_id);
 
-  /// Delete objects that have been created in the hash table. This should only
-  /// be called on objects that are returned by the eviction policy to evict.
+  /// Evict objects returned by the eviction policy.
   ///
-  /// @param object_ids Object IDs of the objects to be deleted.
-  void DeleteObjects(const std::vector<ObjectID>& object_ids);
+  /// @param object_ids Object IDs of the objects to be evicted.
+  void EvictObjects(const std::vector<ObjectID>& object_ids);
 
   /// Process a get request from a client. This method assumes that we will
   /// eventually have these objects sealed. If one of the objects has not yet
@@ -135,13 +130,14 @@ class PlasmaStore {
   void ProcessGetRequest(Client* client, const std::vector<ObjectID>& object_ids,
                          int64_t timeout_ms);
 
-  /// Seal an object. The object is now immutable and can be accessed with get.
+  /// Seal a vector of objects. The objects are now immutable and can be accessed with
+  /// get.
   ///
-  /// @param object_id Object ID of the object to be sealed.
-  /// @param digest The digest of the object. This is used to tell if two
-  /// objects
-  ///        with the same object ID are the same.
-  void SealObject(const ObjectID& object_id, unsigned char digest[]);
+  /// @param object_ids The vector of Object IDs of the objects to be sealed.
+  /// @param digests The vector of digests of the objects. This is used to tell if two
+  /// objects with the same object ID are the same.
+  void SealObjects(const std::vector<ObjectID>& object_ids,
+                   const std::vector<std::string>& digests);
 
   /// Check if the plasma store contains an object:
   ///
@@ -173,15 +169,27 @@ class PlasmaStore {
 
   NotificationMap::iterator SendNotifications(NotificationMap::iterator it);
 
-  Status ProcessMessage(Client* client);
+  arrow::Status ProcessMessage(Client* client);
 
  private:
   void PushNotification(ObjectInfoT* object_notification);
+
+  void PushNotifications(std::vector<ObjectInfoT>& object_notifications);
 
   void PushNotification(ObjectInfoT* object_notification, int client_fd);
 
   void AddToClientObjectIds(const ObjectID& object_id, ObjectTableEntry* entry,
                             Client* client);
+
+  /// Remove a GetRequest and clean up the relevant data structures.
+  ///
+  /// @param get_request The GetRequest to remove.
+  void RemoveGetRequest(GetRequest* get_request);
+
+  /// Remove all of the GetRequests for a given client.
+  ///
+  /// @param client The client whose GetRequests should be removed.
+  void RemoveGetRequestsForClient(Client* client);
 
   void ReturnFromGet(GetRequest* get_req);
 
@@ -190,13 +198,24 @@ class PlasmaStore {
   int RemoveFromClientObjectIds(const ObjectID& object_id, ObjectTableEntry* entry,
                                 Client* client);
 
+  void EraseFromObjectTable(const ObjectID& object_id);
+
+  uint8_t* AllocateMemory(size_t size, int* fd, int64_t* map_size, ptrdiff_t* offset,
+                          Client* client, bool is_create);
+#ifdef PLASMA_CUDA
+  Status AllocateCudaMemory(int device_num, int64_t size, uint8_t** out_pointer,
+                            std::shared_ptr<CudaIpcMemHandle>* out_ipc_handle);
+
+  Status FreeCudaMemory(int device_num, int64_t size, uint8_t* out_pointer);
+#endif
+
   /// Event loop of the plasma store.
   EventLoop* loop_;
   /// The plasma store information, including the object tables, that is exposed
   /// to the eviction policy.
   PlasmaStoreInfo store_info_;
   /// The state that is managed by the eviction policy.
-  EvictionPolicy eviction_policy_;
+  QuotaAwarePolicy eviction_policy_;
   /// Input buffer. This is allocated only once to avoid mallocs for every
   /// call to process_message.
   std::vector<uint8_t> input_buffer_;
@@ -213,8 +232,12 @@ class PlasmaStore {
   std::unordered_map<int, std::unique_ptr<Client>> connected_clients_;
 
   std::unordered_set<ObjectID> deletion_cache_;
-#ifdef PLASMA_GPU
-  arrow::gpu::CudaDeviceManager* manager_;
+
+  /// Manages worker threads for handling asynchronous/multi-threaded requests
+  /// for reading/writing data to/from external store.
+  std::shared_ptr<ExternalStore> external_store_;
+#ifdef PLASMA_CUDA
+  arrow::cuda::CudaDeviceManager* manager_;
 #endif
 };
 

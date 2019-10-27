@@ -1,49 +1,55 @@
-/*******************************************************************************
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
- ******************************************************************************/
+ */
 
 package org.apache.arrow.vector.ipc;
 
-import static com.fasterxml.jackson.core.JsonToken.END_ARRAY;
-import static com.fasterxml.jackson.core.JsonToken.END_OBJECT;
-import static com.fasterxml.jackson.core.JsonToken.START_ARRAY;
-import static com.fasterxml.jackson.core.JsonToken.START_OBJECT;
+import static com.fasterxml.jackson.core.JsonToken.*;
 import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.apache.arrow.vector.BufferLayout.BufferType.*;
 
 import java.io.File;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.*;
+import java.util.Objects;
 
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Lists;
-import io.netty.buffer.ArrowBuf;
 import org.apache.arrow.memory.BufferAllocator;
-import org.apache.arrow.vector.*;
+import org.apache.arrow.vector.BigIntVector;
+import org.apache.arrow.vector.BitVectorHelper;
+import org.apache.arrow.vector.BufferLayout.BufferType;
+import org.apache.arrow.vector.DecimalVector;
+import org.apache.arrow.vector.FieldVector;
+import org.apache.arrow.vector.Float4Vector;
+import org.apache.arrow.vector.Float8Vector;
+import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.IntervalDayVector;
+import org.apache.arrow.vector.SmallIntVector;
+import org.apache.arrow.vector.TinyIntVector;
+import org.apache.arrow.vector.TypeLayout;
+import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.dictionary.Dictionary;
 import org.apache.arrow.vector.dictionary.DictionaryProvider;
 import org.apache.arrow.vector.ipc.message.ArrowFieldNode;
-import org.apache.arrow.vector.BufferLayout.BufferType;
-import org.apache.arrow.vector.TypeLayout;
 import org.apache.arrow.vector.types.Types;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
@@ -56,8 +62,15 @@ import com.fasterxml.jackson.core.JsonParseException;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.databind.MappingJsonFactory;
-import com.google.common.base.Objects;
 
+import io.netty.buffer.ArrowBuf;
+
+/**
+ * A reader for JSON files that translates them into vectors. This reader is used for integration tests.
+ *
+ * <p>This class uses a streaming parser API, method naming tends to reflect this implementation
+ * detail.
+ */
 public class JsonFileReader implements AutoCloseable, DictionaryProvider {
   private final JsonParser parser;
   private final BufferAllocator allocator;
@@ -65,6 +78,11 @@ public class JsonFileReader implements AutoCloseable, DictionaryProvider {
   private Map<Long, Dictionary> dictionaries;
   private Boolean started = false;
 
+  /**
+   * Constructs a new instance.
+   * @param inputFile The file to read.
+   * @param allocator The allocator to use for allocating buffers.
+   */
   public JsonFileReader(File inputFile, BufferAllocator allocator) throws JsonParseException, IOException {
     super();
     this.allocator = allocator;
@@ -83,6 +101,7 @@ public class JsonFileReader implements AutoCloseable, DictionaryProvider {
     return dictionaries.get(id);
   }
 
+  /** Reads the beginning (schema section) of the json file and returns it. */
   public Schema start() throws JsonParseException, IOException {
     readToken(START_OBJECT);
     {
@@ -124,8 +143,8 @@ public class JsonFileReader implements AutoCloseable, DictionaryProvider {
       // Read the dictionary record batch
       nextFieldIs("data");
       FieldVector vector = dict.getVector();
-      List<Field> fields = ImmutableList.of(vector.getField());
-      List<FieldVector> vectors = ImmutableList.of(vector);
+      List<Field> fields = Collections.singletonList(vector.getField());
+      List<FieldVector> vectors = Collections.singletonList(vector);
       VectorSchemaRoot root = new VectorSchemaRoot(fields, vectors, vector.getValueCount());
       read(root);
 
@@ -135,10 +154,14 @@ public class JsonFileReader implements AutoCloseable, DictionaryProvider {
     }
 
     if (token != END_ARRAY) {
-      throw new IllegalArgumentException("Invalid token: " + token + " expected end of array at " + parser.getTokenLocation());
+      throw new IllegalArgumentException("Invalid token: " + token + " expected end of array at " +
+        parser.getTokenLocation());
     }
   }
 
+  /**
+   * Reads the next record batch from the file into <code>root</code>.
+   */
   public boolean read(VectorSchemaRoot root) throws IOException {
     JsonToken t = parser.nextToken();
     if (t == START_OBJECT) {
@@ -165,6 +188,9 @@ public class JsonFileReader implements AutoCloseable, DictionaryProvider {
     }
   }
 
+  /**
+   * Returns the next record batch from the file.
+   */
   public VectorSchemaRoot read() throws IOException {
     JsonToken t = parser.nextToken();
     if (t == START_OBJECT) {
@@ -192,7 +218,7 @@ public class JsonFileReader implements AutoCloseable, DictionaryProvider {
   }
 
   private abstract class BufferReader {
-    abstract protected ArrowBuf read(BufferAllocator allocator, int count) throws IOException;
+    protected abstract ArrowBuf read(BufferAllocator allocator, int count) throws IOException;
 
     ArrowBuf readBuffer(BufferAllocator allocator, int count) throws IOException {
       readToken(START_ARRAY);
@@ -218,6 +244,23 @@ public class JsonFileReader implements AutoCloseable, DictionaryProvider {
         }
 
         buf.writerIndex(bufferSize);
+        return buf;
+      }
+    };
+
+    BufferReader DAY_MILLIS = new BufferReader() {
+      @Override
+      protected ArrowBuf read(BufferAllocator allocator, int count) throws IOException {
+        final int size = count * IntervalDayVector.TYPE_WIDTH;
+        ArrowBuf buf = allocator.buffer(size);
+
+        for (int i = 0; i < count; i++) {
+          readToken(START_OBJECT);
+          buf.writeInt(readNextField("days", Integer.class));
+          buf.writeInt(readNextField("milliseconds", Integer.class));
+          readToken(END_OBJECT);
+        }
+
         return buf;
       }
     };
@@ -275,7 +318,69 @@ public class JsonFileReader implements AutoCloseable, DictionaryProvider {
 
         for (int i = 0; i < count; i++) {
           parser.nextToken();
-          buf.writeLong(parser.getLongValue());
+          String value = parser.getValueAsString();
+          buf.writeLong(Long.valueOf(value));
+        }
+
+        return buf;
+      }
+    };
+
+    BufferReader UINT1 = new BufferReader() {
+      @Override
+      protected ArrowBuf read(BufferAllocator allocator, int count) throws IOException {
+        final int size = count * TinyIntVector.TYPE_WIDTH;
+        ArrowBuf buf = allocator.buffer(size);
+
+        for (int i = 0; i < count; i++) {
+          parser.nextToken();
+          buf.writeByte(parser.getShortValue() & 0xFF);
+        }
+
+        return buf;
+      }
+    };
+
+    BufferReader UINT2 = new BufferReader() {
+      @Override
+      protected ArrowBuf read(BufferAllocator allocator, int count) throws IOException {
+        final int size = count * SmallIntVector.TYPE_WIDTH;
+        ArrowBuf buf = allocator.buffer(size);
+
+        for (int i = 0; i < count; i++) {
+          parser.nextToken();
+          buf.writeShort(parser.getIntValue() & 0xFFFF);
+        }
+
+        return buf;
+      }
+    };
+
+    BufferReader UINT4 = new BufferReader() {
+      @Override
+      protected ArrowBuf read(BufferAllocator allocator, int count) throws IOException {
+        final int size = count * IntVector.TYPE_WIDTH;
+        ArrowBuf buf = allocator.buffer(size);
+
+        for (int i = 0; i < count; i++) {
+          parser.nextToken();
+          buf.writeInt((int)parser.getLongValue());
+        }
+
+        return buf;
+      }
+    };
+
+    BufferReader UINT8 = new BufferReader() {
+      @Override
+      protected ArrowBuf read(BufferAllocator allocator, int count) throws IOException {
+        final int size = count * BigIntVector.TYPE_WIDTH;
+        ArrowBuf buf = allocator.buffer(size);
+
+        for (int i = 0; i < count; i++) {
+          parser.nextToken();
+          BigInteger value = new BigInteger(parser.getValueAsString());
+          buf.writeLong(value.longValue());
         }
 
         return buf;
@@ -332,7 +437,7 @@ public class JsonFileReader implements AutoCloseable, DictionaryProvider {
     BufferReader FIXEDSIZEBINARY = new BufferReader() {
       @Override
       protected ArrowBuf read(BufferAllocator allocator, int count) throws IOException {
-        ArrayList<byte[]> values = Lists.newArrayList();
+        ArrayList<byte[]> values = new ArrayList<>();
         for (int i = 0; i < count; i++) {
           parser.nextToken();
           final byte[] value = decodeHexSafe(parser.readValueAs(String.class));
@@ -352,7 +457,7 @@ public class JsonFileReader implements AutoCloseable, DictionaryProvider {
     BufferReader VARCHAR = new BufferReader() {
       @Override
       protected ArrowBuf read(BufferAllocator allocator, int count) throws IOException {
-        ArrayList<byte[]> values = Lists.newArrayList();
+        ArrayList<byte[]> values = new ArrayList<>();
         int bufferSize = 0;
         for (int i = 0; i < count; i++) {
           parser.nextToken();
@@ -375,7 +480,7 @@ public class JsonFileReader implements AutoCloseable, DictionaryProvider {
     BufferReader VARBINARY = new BufferReader() {
       @Override
       protected ArrowBuf read(BufferAllocator allocator, int count) throws IOException {
-        ArrayList<byte[]> values = Lists.newArrayList();
+        ArrayList<byte[]> values = new ArrayList<>();
         int bufferSize = 0;
         for (int i = 0; i < count; i++) {
           parser.nextToken();
@@ -428,16 +533,16 @@ public class JsonFileReader implements AutoCloseable, DictionaryProvider {
           reader = helper.INT8;
           break;
         case UINT1:
-          reader = helper.INT1;
+          reader = helper.UINT1;
           break;
         case UINT2:
-          reader = helper.INT2;
+          reader = helper.UINT2;
           break;
         case UINT4:
-          reader = helper.INT4;
+          reader = helper.UINT4;
           break;
         case UINT8:
-          reader = helper.INT8;
+          reader = helper.UINT8;
           break;
         case FLOAT4:
           reader = helper.FLOAT4;
@@ -481,6 +586,15 @@ public class JsonFileReader implements AutoCloseable, DictionaryProvider {
         case TIMESTAMPSECTZ:
           reader = helper.INT8;
           break;
+        case INTERVALYEAR:
+          reader = helper.INT4;
+          break;
+        case INTERVALDAY:
+          reader = helper.DAY_MILLIS;
+          break;
+        case DURATION:
+          reader = helper.INT8;
+          break;
         default:
           throw new UnsupportedOperationException("Cannot read array of type " + type);
       }
@@ -517,7 +631,7 @@ public class JsonFileReader implements AutoCloseable, DictionaryProvider {
     {
       // If currently reading dictionaries, field name is not important so don't check
       String name = readNextField("name", String.class);
-      if (started && !Objects.equal(field.getName(), name)) {
+      if (started && !Objects.equals(field.getName(), name)) {
         throw new IllegalArgumentException("Expected field " + field.getName() + " but got " + name);
       }
 
@@ -537,6 +651,11 @@ public class JsonFileReader implements AutoCloseable, DictionaryProvider {
         }
 
         vectorBuffers[v] = readIntoBuffer(allocator, bufferType, vector.getMinorType(), innerBufferValueCount);
+      }
+
+      if (vectorBuffers.length == 0) {
+        readToken(END_OBJECT);
+        return;
       }
 
       final int nullCount = BitVectorHelper.getNullCount(vectorBuffers[0], valueCount);
@@ -564,7 +683,7 @@ public class JsonFileReader implements AutoCloseable, DictionaryProvider {
     readToken(END_OBJECT);
 
     for (ArrowBuf buffer: vectorBuffers) {
-      buffer.release();
+      buffer.getReferenceManager().release();
     }
   }
 

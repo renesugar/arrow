@@ -42,10 +42,16 @@ from distutils import sysconfig
 # Check if we're running 64-bit Python
 is_64_bit = sys.maxsize > 2**32
 
-if Cython.__version__ < '0.27':
-    raise Exception('Please upgrade to Cython 0.27 or newer')
+if Cython.__version__ < '0.29':
+    raise Exception('Please upgrade to Cython 0.29 or newer')
 
 setup_dir = os.path.abspath(os.path.dirname(__file__))
+
+
+ext_suffix = sysconfig.get_config_var('EXT_SUFFIX')
+if ext_suffix is None:
+    # https://bugs.python.org/issue19555
+    ext_suffix = sysconfig.get_config_var('SO')
 
 
 @contextlib.contextmanager
@@ -98,6 +104,8 @@ class build_ext(_build_ext):
                       'build type (debug or release), default release'),
                      ('boost-namespace=', None,
                       'namespace of boost (default: boost)'),
+                     ('with-cuda', None, 'build the Cuda extension'),
+                     ('with-flight', None, 'build the Flight extension'),
                      ('with-parquet', None, 'build the Parquet extension'),
                      ('with-static-parquet', None, 'link parquet statically'),
                      ('with-static-boost', None, 'link boost statically'),
@@ -105,6 +113,7 @@ class build_ext(_build_ext):
                      ('with-tensorflow', None,
                       'build pyarrow with TensorFlow support'),
                      ('with-orc', None, 'build the ORC extension'),
+                     ('with-gandiva', None, 'build the Gandiva extension'),
                      ('generate-coverage', None,
                       'enable Cython code coverage'),
                      ('bundle-boost', None,
@@ -132,6 +141,12 @@ class build_ext(_build_ext):
             if not hasattr(sys, 'gettotalrefcount'):
                 self.build_type = 'release'
 
+        self.with_s3 = strtobool(
+            os.environ.get('PYARROW_WITH_S3', '0'))
+        self.with_cuda = strtobool(
+            os.environ.get('PYARROW_WITH_CUDA', '0'))
+        self.with_flight = strtobool(
+            os.environ.get('PYARROW_WITH_FLIGHT', '0'))
         self.with_parquet = strtobool(
             os.environ.get('PYARROW_WITH_PARQUET', '0'))
         self.with_static_parquet = strtobool(
@@ -144,6 +159,8 @@ class build_ext(_build_ext):
             os.environ.get('PYARROW_WITH_TENSORFLOW', '0'))
         self.with_orc = strtobool(
             os.environ.get('PYARROW_WITH_ORC', '0'))
+        self.with_gandiva = strtobool(
+            os.environ.get('PYARROW_WITH_GANDIVA', '0'))
         self.generate_coverage = strtobool(
             os.environ.get('PYARROW_GENERATE_COVERAGE', '0'))
         self.bundle_arrow_cpp = strtobool(
@@ -153,11 +170,23 @@ class build_ext(_build_ext):
 
     CYTHON_MODULE_NAMES = [
         'lib',
+        '_fs',
+        '_csv',
+        '_json',
+        '_cuda',
+        '_flight',
         '_parquet',
         '_orc',
-        '_plasma']
+        '_plasma',
+        '_s3fs',
+        'gandiva']
 
     def _run_cmake(self):
+        # check if build_type is correctly passed / set
+        if self.build_type.lower() not in ('release', 'debug'):
+            raise ValueError("--build-type (or PYARROW_BUILD_TYPE) needs to "
+                             "be 'release' or 'debug'")
+
         # The directory containing this setup.py
         source = osp.dirname(osp.abspath(__file__))
 
@@ -189,6 +218,12 @@ class build_ext(_build_ext):
 
             if self.cmake_generator:
                 cmake_options += ['-G', self.cmake_generator]
+            if self.with_s3:
+                cmake_options.append('-DPYARROW_BUILD_S3=on')
+            if self.with_cuda:
+                cmake_options.append('-DPYARROW_BUILD_CUDA=on')
+            if self.with_flight:
+                cmake_options.append('-DPYARROW_BUILD_FLIGHT=on')
             if self.with_parquet:
                 cmake_options.append('-DPYARROW_BUILD_PARQUET=on')
             if self.with_static_parquet:
@@ -206,6 +241,9 @@ class build_ext(_build_ext):
 
             if self.with_orc:
                 cmake_options.append('-DPYARROW_BUILD_ORC=on')
+
+            if self.with_gandiva:
+                cmake_options.append('-DPYARROW_BUILD_GANDIVA=on')
 
             if len(self.cmake_cxxflags) > 0:
                 cmake_options.append('-DPYARROW_CXXFLAGS={0}'
@@ -248,7 +286,7 @@ class build_ext(_build_ext):
                         '-j{0}'.format(os.environ['PYARROW_PARALLEL']))
 
             # Generate the build files
-            print("-- Runnning cmake for pyarrow")
+            print("-- Running cmake for pyarrow")
             self.spawn(['cmake'] + extra_cmake_args + cmake_options + [source])
             print("-- Finished cmake for pyarrow")
 
@@ -273,25 +311,6 @@ class build_ext(_build_ext):
             else:
                 build_prefix = self.build_type
 
-            if self.bundle_arrow_cpp:
-                print(pjoin(build_lib, 'pyarrow'))
-                move_shared_libs(build_prefix, build_lib, "arrow")
-                move_shared_libs(build_prefix, build_lib, "arrow_python")
-                if self.with_plasma:
-                    move_shared_libs(build_prefix, build_lib, "plasma")
-                if self.with_parquet and not self.with_static_parquet:
-                    move_shared_libs(build_prefix, build_lib, "parquet")
-                if not self.with_static_boost and self.bundle_boost:
-                    move_shared_libs(
-                        build_prefix, build_lib,
-                        "{}_filesystem".format(self.boost_namespace))
-                    move_shared_libs(
-                        build_prefix, build_lib,
-                        "{}_system".format(self.boost_namespace))
-                    move_shared_libs(
-                        build_prefix, build_lib,
-                        "{}_regex".format(self.boost_namespace))
-
             print('Bundling includes: ' + pjoin(build_prefix, 'include'))
             if os.path.exists(pjoin(build_lib, 'pyarrow', 'include')):
                 shutil.rmtree(pjoin(build_lib, 'pyarrow', 'include'))
@@ -304,7 +323,7 @@ class build_ext(_build_ext):
             for name in self.CYTHON_MODULE_NAMES:
                 built_path = self.get_ext_built(name)
                 if not os.path.exists(built_path):
-                    print(built_path)
+                    print('Did not find {0}'.format(built_path))
                     if self._failure_permitted(name):
                         print('Cython module {0} failure permitted'
                               .format(name))
@@ -343,12 +362,54 @@ class build_ext(_build_ext):
                                 pjoin(os.path.dirname(ext_path),
                                       name + '_api.h'))
 
+            if self.bundle_arrow_cpp:
+                print(pjoin(build_lib, 'pyarrow'))
+                move_shared_libs(build_prefix, build_lib, "arrow")
+                move_shared_libs(build_prefix, build_lib, "arrow_python")
+                if self.with_cuda:
+                    move_shared_libs(build_prefix, build_lib, "arrow_cuda")
+                if self.with_flight:
+                    move_shared_libs(build_prefix, build_lib, "arrow_flight")
+                    move_shared_libs(build_prefix, build_lib,
+                                     "arrow_python_flight")
+                if self.with_plasma:
+                    move_shared_libs(build_prefix, build_lib, "plasma")
+                if self.with_gandiva:
+                    move_shared_libs(build_prefix, build_lib, "gandiva")
+                if self.with_parquet and not self.with_static_parquet:
+                    move_shared_libs(build_prefix, build_lib, "parquet")
+                if not self.with_static_boost and self.bundle_boost:
+                    move_shared_libs(
+                        build_prefix, build_lib,
+                        "{}_filesystem".format(self.boost_namespace),
+                        implib_required=False)
+                    move_shared_libs(
+                        build_prefix, build_lib,
+                        "{}_system".format(self.boost_namespace),
+                        implib_required=False)
+                    move_shared_libs(
+                        build_prefix, build_lib,
+                        "{}_regex".format(self.boost_namespace),
+                        implib_required=False)
+                if sys.platform == 'win32':
+                    # zlib uses zlib.dll for Windows
+                    zlib_lib_name = 'zlib'
+                    move_shared_libs(build_prefix, build_lib, zlib_lib_name,
+                                     implib_required=False)
+                    if self.with_flight:
+                        # DLL dependencies for gRPC / Flight
+                        for lib_name in ['cares', 'libprotobuf',
+                                         'libcrypto-1_1-x64',
+                                         'libssl-1_1-x64']:
+                            move_shared_libs(build_prefix, build_lib, lib_name,
+                                             implib_required=False)
+
             if self.with_plasma:
                 # Move the plasma store
-                source = os.path.join(self.build_type, "plasma_store_server")
+                source = os.path.join(self.build_type, "plasma-store-server")
                 target = os.path.join(build_lib,
                                       self._get_build_dir(),
-                                      "plasma_store_server")
+                                      "plasma-store-server")
                 shutil.move(source, target)
 
     def _failure_permitted(self, name):
@@ -357,6 +418,14 @@ class build_ext(_build_ext):
         if name == '_plasma' and not self.with_plasma:
             return True
         if name == '_orc' and not self.with_orc:
+            return True
+        if name == '_flight' and not self.with_flight:
+            return True
+        if name == '_s3fs' and not self.with_s3:
+            return True
+        if name == '_cuda' and not self.with_cuda:
+            return True
+        if name == 'gandiva' and not self.with_gandiva:
             return True
         return False
 
@@ -367,10 +436,7 @@ class build_ext(_build_ext):
 
     def _get_cmake_ext_path(self, name):
         # This is the name of the arrow C-extension
-        suffix = sysconfig.get_config_var('EXT_SUFFIX')
-        if suffix is None:
-            suffix = sysconfig.get_config_var('SO')
-        filename = name + suffix
+        filename = name + ext_suffix
         return pjoin(self._get_build_dir(), filename)
 
     def get_ext_generated_cpp_source(self, name):
@@ -390,16 +456,14 @@ class build_ext(_build_ext):
     def get_ext_built(self, name):
         if sys.platform == 'win32':
             head, tail = os.path.split(name)
-            suffix = sysconfig.get_config_var('SO')
             # Visual Studio seems to differ from other generators in
             # where it places output files.
             if self.cmake_generator.startswith('Visual Studio'):
-                return pjoin(head, self.build_type, tail + suffix)
+                return pjoin(head, self.build_type, tail + ext_suffix)
             else:
-                return pjoin(head, tail + suffix)
+                return pjoin(head, tail + ext_suffix)
         else:
-            suffix = sysconfig.get_config_var('SO')
-            return pjoin(self.build_type, name + suffix)
+            return pjoin(self.build_type, name + ext_suffix)
 
     def get_names(self):
         return self._found_names
@@ -411,11 +475,13 @@ class build_ext(_build_ext):
                 for name in self.get_names()]
 
 
-def move_shared_libs(build_prefix, build_lib, lib_name):
+def move_shared_libs(build_prefix, build_lib, lib_name,
+                     implib_required=True):
     if sys.platform == 'win32':
         # Move all .dll and .lib files
-        libs = glob.glob(pjoin(build_prefix, lib_name) + '*')
-
+        libs = [lib_name + '.dll']
+        if implib_required:
+            libs.append(lib_name + '.lib')
         for filename in libs:
             shutil.move(pjoin(build_prefix, filename),
                         pjoin(build_lib, 'pyarrow', filename))
@@ -459,39 +525,20 @@ def _move_shared_libs_unix(build_prefix, build_lib, lib_name):
 
 # If the event of not running from a git clone (e.g. from a git archive
 # or a Python sdist), see if we can set the version number ourselves
+default_version = '1.0.0-SNAPSHOT'
 if (not os.path.exists('../.git')
         and not os.environ.get('SETUPTOOLS_SCM_PRETEND_VERSION')):
     if os.path.exists('PKG-INFO'):
         # We're probably in a Python sdist, setuptools_scm will handle fine
         pass
-    elif os.path.exists('../java/pom.xml'):
-        # We're probably in a git archive
-        import xml.etree.ElementTree as ET
-        tree = ET.parse('../java/pom.xml')
-        version_tag = list(tree.getroot().findall(
-            '{http://maven.apache.org/POM/4.0.0}version'))[0]
-        use_setuptools_scm = False
-        os.environ['SETUPTOOLS_SCM_PRETEND_VERSION'] = \
-            version_tag.text.replace("-SNAPSHOT", "a0")
     else:
-        raise RuntimeError("""\
-            No reliable source available to get Arrow version.
+        os.environ['SETUPTOOLS_SCM_PRETEND_VERSION'] = \
+            default_version.replace('-SNAPSHOT', 'a0')
 
-            This is either because you copied the python/ directory yourself
-            outside of a git clone or source archive, or because you ran
-            `pip install` on the python/ directory.
 
-            * Recommended workaround: first run `python sdist`, then
-              `pip install` the resulting source distribution.
-
-            * If you're looking for an editable (in-place) install,
-              `python setup.py develop` should work fine in place of
-              `pip install -e .`.
-
-            * If you really want to `pip install` the python/ directory,
-              set the SETUPTOOLS_SCM_PRETEND_VERSION environment variable
-              to force the Arrow version to the given value.
-            """)
+# See https://github.com/pypa/setuptools_scm#configuration-parameters
+scm_version_write_to_prefix = os.environ.get(
+    'SETUPTOOLS_SCM_VERSION_WRITE_TO_PREFIX', setup_dir)
 
 
 def parse_git(root, **kwargs):
@@ -500,8 +547,8 @@ def parse_git(root, **kwargs):
     subprojects, e.g. apache-arrow-js-XXX tags.
     """
     from setuptools_scm.git import parse
-    kwargs['describe_command'] = \
-        "git describe --dirty --tags --long --match 'apache-arrow-[0-9].*'"
+    kwargs['describe_command'] =\
+        'git describe --dirty --tags --long --match "apache-arrow-[0-9].*"'
     return parse(root, **kwargs)
 
 
@@ -515,9 +562,10 @@ class BinaryDistribution(Distribution):
 
 
 install_requires = (
-    'numpy >= 1.10',
+    'numpy >= 1.14',
     'six >= 1.0.0',
-    'futures;python_version<"3.2"'
+    'futures; python_version < "3.2"',
+    'enum34 >= 1.1.6; python_version < "3.4"',
 )
 
 
@@ -529,7 +577,7 @@ else:
 
 
 setup(
-    name="pyarrow",
+    name='pyarrow',
     packages=['pyarrow', 'pyarrow.tests'],
     zip_safe=False,
     package_data={'pyarrow': ['*.pxd', '*.pyx', 'includes/*.pxd']},
@@ -546,26 +594,29 @@ setup(
             'plasma_store = pyarrow:_plasma_store_entry_point'
         ]
     },
-    use_scm_version={"root": os.path.dirname(setup_dir),
-                     "parse": parse_git,
-                     "write_to": os.path.join(setup_dir,
-                                              "pyarrow/_generated_version.py"),
-                     },
-    setup_requires=['setuptools_scm', 'cython >= 0.27'] + setup_requires,
+    use_scm_version={
+        'root': os.path.dirname(setup_dir),
+        'parse': parse_git,
+        'write_to': os.path.join(scm_version_write_to_prefix,
+                                 'pyarrow/_generated_version.py')
+    },
+    setup_requires=['setuptools_scm', 'cython >= 0.29'] + setup_requires,
     install_requires=install_requires,
-    tests_require=['pytest', 'pandas'],
-    description="Python library for Apache Arrow",
+    tests_require=['pytest', 'pandas', 'hypothesis',
+                   'pathlib2; python_version < "3.4"'],
+    description='Python library for Apache Arrow',
     long_description=long_description,
-    long_description_content_type="text/markdown",
+    long_description_content_type='text/markdown',
     classifiers=[
         'License :: OSI Approved :: Apache Software License',
         'Programming Language :: Python :: 2.7',
         'Programming Language :: Python :: 3.5',
-        'Programming Language :: Python :: 3.6'
-        ],
+        'Programming Language :: Python :: 3.6',
+        'Programming Language :: Python :: 3.7',
+    ],
     license='Apache License, Version 2.0',
-    maintainer="Apache Arrow Developers",
-    maintainer_email="dev@arrow.apache.org",
-    test_suite="pyarrow.tests",
-    url="https://arrow.apache.org/"
+    maintainer='Apache Arrow Developers',
+    maintainer_email='dev@arrow.apache.org',
+    test_suite='pyarrow.tests',
+    url='https://arrow.apache.org/'
 )

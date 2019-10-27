@@ -17,7 +17,8 @@
 
 # flake8: noqa
 
-from distutils.version import LooseVersion
+from __future__ import absolute_import
+
 import itertools
 
 import numpy as np
@@ -25,42 +26,11 @@ import numpy as np
 import sys
 import six
 from six import BytesIO, StringIO, string_types as py_string
+import socket
 
 
 PY26 = sys.version_info[:2] == (2, 6)
 PY2 = sys.version_info[0] == 2
-
-try:
-    import pandas as pd
-    pdver = LooseVersion(pd.__version__)
-    if pdver >= '0.20.0':
-        from pandas.api.types import DatetimeTZDtype
-        pdapi = pd.api.types
-    elif pdver >= '0.19.0':
-        from pandas.types.dtypes import DatetimeTZDtype
-        pdapi = pd.api.types
-    else:
-        from pandas.types.dtypes import DatetimeTZDtype
-        pdapi = pd.core.common
-
-    PandasSeries = pd.Series
-    Categorical = pd.Categorical
-    HAVE_PANDAS = True
-except:
-    HAVE_PANDAS = False
-    class DatetimeTZDtype(object):
-        pass
-
-    class ClassPlaceholder(object):
-
-        def __init__(self, *args, **kwargs):
-            raise NotImplementedError
-
-    class PandasSeries(ClassPlaceholder):
-        pass
-
-    class Categorical(ClassPlaceholder):
-        pass
 
 
 if PY26:
@@ -77,7 +47,10 @@ if PY2:
     except ImportError:
         from decimal import Decimal
 
+    from collections import Iterable, Mapping, Sequence
+
     unicode_type = unicode
+    file_type = file
     lzip = zip
     zip = itertools.izip
     zip_longest = itertools.izip_longest
@@ -101,6 +74,9 @@ if PY2:
         else:
             return o
 
+    def u_utf8(s):
+        return s.decode('utf-8')
+
     def frombytes(o):
         return o
 
@@ -112,7 +88,10 @@ else:
     except ImportError:
         import pickle as builtin_pickle
 
+    from collections.abc import Iterable, Mapping, Sequence
+
     unicode_type = str
+    file_type = None
     def lzip(*x):
         return list(zip(*x))
     long = int
@@ -136,11 +115,25 @@ else:
         else:
             return o
 
+    def u_utf8(s):
+        if isinstance(s, bytes):
+            return frombytes(s)
+        return s
+
     def frombytes(o):
         return o.decode('utf8')
 
     def unichar(s):
         return chr(s)
+
+
+if sys.version_info >= (3, 7):
+    # Starting with Python 3.7, dicts are guaranteed to be insertion-ordered.
+    ordered_dict = dict
+else:
+    import collections
+    ordered_dict = collections.OrderedDict
+
 
 try:
     import cloudpickle as pickle
@@ -160,109 +153,61 @@ def encode_file_path(path):
     # will convert utf8 to utf16
     return encoded_path
 
-def _iterate_python_module_paths(package_name):
-    """
-    Return an iterator to full paths of a python package.
-
-    This is a best effort and might fail.
-    It uses the official way of loading modules from
-    https://docs.python.org/3/library/importlib.html#approximating-importlib-import-module
-    """
-    if PY2:
-        import imp
-        try:
-            _, pathname, _ = imp.find_module(package_name)
-        except ImportError:
-            return
-        else:
-            yield pathname
-    else:
-        try:
-            import importlib
-            absolute_name = importlib.util.resolve_name(package_name, None)
-        except (ImportError, AttributeError):
-            # Sometimes, importlib is not available (e.g. Python 2)
-            # or importlib.util is not available (e.g. Python 2.7)
-            spec = None
-        else:
-            import sys
-            for finder in sys.meta_path:
-                try:
-                    spec = finder.find_spec(absolute_name, None)
-                except AttributeError:
-                    # On Travis (Python 3.5) the above produced:
-                    # AttributeError: 'VendorImporter' object has no
-                    # attribute 'find_spec'
-                    spec = None
-                if spec is not None:
-                    break
-
-        if spec:
-            module = importlib.util.module_from_spec(spec)
-            for path in module.__path__:
-                yield path
-
-def import_tensorflow_extension():
-    """
-    Load the TensorFlow extension if it exists.
-
-    This is used to load the TensorFlow extension before
-    pyarrow.lib. If we don't do this there are symbol clashes
-    between TensorFlow's use of threading and our global
-    thread pool, see also
-    https://issues.apache.org/jira/browse/ARROW-2657 and
-    https://github.com/apache/arrow/pull/2096.
-    """
-    import os
-    tensorflow_loaded = False
-
-    # Try to load the tensorflow extension directly
-    # This is a performance optimization, tensorflow will always be
-    # loaded via the "import tensorflow" statement below if this
-    # doesn't succeed.
-
-    for path in _iterate_python_module_paths("tensorflow"):
-        ext = os.path.join(path, "libtensorflow_framework.so")
-        if os.path.exists(ext):
-            import ctypes
-            try:
-                ctypes.CDLL(ext)
-            except OSError:
-                pass
-            tensorflow_loaded = True
-            break
-
-    # If the above failed, try to load tensorflow the normal way
-    # (this is more expensive)
-
-    if not tensorflow_loaded:
-        try:
-            import tensorflow
-        except ImportError:
-            pass
-
-def import_pytorch_extension():
-    """
-    Load the PyTorch extension if it exists.
-
-    This is used to load the PyTorch extension before
-    pyarrow.lib. If we don't do this there are symbol clashes
-    between PyTorch's use of threading and our global
-    thread pool, see also
-    https://issues.apache.org/jira/browse/ARROW-2920
-    """
-    import ctypes
-    import os
-
-    for path in _iterate_python_module_paths("torch"):
-        try:
-            ctypes.CDLL(os.path.join(path, "lib/libcaffe2.so"))
-        except OSError:
-            # lib/libcaffe2.so only exists in pytorch starting from 0.4.0,
-            # in older versions of pytorch there are not symbol clashes
-            pass
-
 
 integer_types = six.integer_types + (np.integer,)
+
+
+def get_socket_from_fd(fileno, family, type):
+    if PY2:
+        socket_obj = socket.fromfd(fileno, family, type)
+        return socket.socket(family, type, _sock=socket_obj)
+    else:
+        return socket.socket(fileno=fileno, family=family, type=type)
+
+
+try:
+    # This function is available after numpy-0.16.0.
+    # See also: https://github.com/numpy/numpy/blob/master/numpy/lib/format.py
+    from numpy.lib.format import descr_to_dtype
+except ImportError:
+    def descr_to_dtype(descr):
+        '''
+        descr may be stored as dtype.descr, which is a list of
+        (name, format, [shape]) tuples where format may be a str or a tuple.
+        Offsets are not explicitly saved, rather empty fields with
+        name, format == '', '|Vn' are added as padding.
+        This function reverses the process, eliminating the empty padding fields.
+        '''
+        if isinstance(descr, str):
+            # No padding removal needed
+            return np.dtype(descr)
+        elif isinstance(descr, tuple):
+            # subtype, will always have a shape descr[1]
+            dt = descr_to_dtype(descr[0])
+            return np.dtype((dt, descr[1]))
+        fields = []
+        offset = 0
+        for field in descr:
+            if len(field) == 2:
+                name, descr_str = field
+                dt = descr_to_dtype(descr_str)
+            else:
+                name, descr_str, shape = field
+                dt = np.dtype((descr_to_dtype(descr_str), shape))
+
+            # Ignore padding bytes, which will be void bytes with '' as name
+            # Once support for blank names is removed, only "if name == ''" needed)
+            is_pad = (name == '' and dt.type is np.void and dt.names is None)
+            if not is_pad:
+                fields.append((name, dt, offset))
+
+            offset += dt.itemsize
+
+        names, formats, offsets = zip(*fields)
+        # names may be (title, names) tuples
+        nametups = (n  if isinstance(n, tuple) else (None, n) for n in names)
+        titles, names = zip(*nametups)
+        return np.dtype({'names': names, 'formats': formats, 'titles': titles,
+                            'offsets': offsets, 'itemsize': offset})
 
 __all__ = []

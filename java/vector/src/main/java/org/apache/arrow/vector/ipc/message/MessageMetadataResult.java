@@ -1,13 +1,12 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -43,6 +42,15 @@ public class MessageMetadataResult {
     this.message = message;
   }
 
+  /**
+   * Creates a new {@link MessageMetadataResult} by parsing it from the beginning of the buffer.
+   *
+   * @param messageLength The length of the serialized flatbuffer message in bytes (might not be equal to the buffer
+   *     size).
+   */
+  public static MessageMetadataResult create(ByteBuffer buffer, int messageLength) {
+    return new MessageMetadataResult(messageLength, buffer, Message.getRootAsMessage(buffer));
+  }
 
   /**
    * Get the length of the message metadata in bytes, not including the body length.
@@ -56,10 +64,21 @@ public class MessageMetadataResult {
   /**
    * Get the buffer containing the raw message metadata bytes, not including the message body data.
    *
-   * @return buffer containing the message metadata
+   * @return buffer containing the message metadata.
    */
   public ByteBuffer getMessageBuffer() {
     return messageBuffer;
+  }
+
+  /**
+   * Returns the bytes remaining in the buffer after parsing the message from it.
+   */
+  public int bytesAfterMessage() {
+    return message.getByteBuffer().remaining();
+  }
+
+  public byte headerType() {
+    return message.headerType();
   }
 
   /**

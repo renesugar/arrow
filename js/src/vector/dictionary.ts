@@ -16,43 +16,45 @@
 // under the License.
 
 import { Data } from '../data';
-import { View, Vector } from '../vector';
-import { IterableArrayLike, DataType, Dictionary, Int } from '../type';
+import { Vector } from '../vector';
+import { BaseVector } from './base';
+import { VectorType as V } from '../interfaces';
+import { VectorBuilderOptions } from './index';
+import { vectorFromValuesWithType } from './index';
+import { VectorBuilderOptionsAsync } from './index';
+import { DataType, Dictionary, TKeys } from '../type';
 
-export class DictionaryView<T extends DataType> implements View<T> {
-    public indices: Vector<Int>;
-    public dictionary: Vector<T>;
-    constructor(dictionary: Vector<T>, indices: Vector<Int>) {
-        this.indices = indices;
-        this.dictionary = dictionary;
-    }
-    public clone(data: Data<Dictionary<T>> & Data<T>): this {
-        return new DictionaryView(data.dictionary, this.indices.clone(data.indices)) as this;
-    }
-    public isValid(index: number): boolean {
-        return this.indices.isValid(index);
-    }
-    public get(index: number): T['TValue'] {
-        return this.dictionary.get(this.indices.get(index));
-    }
-    public set(index: number, value: T['TValue']): void {
-        this.dictionary.set(this.indices.get(index), value);
-    }
-    public toArray(): IterableArrayLike<T['TValue']> {
-        return [...this];
-    }
-    public *[Symbol.iterator](): IterableIterator<T['TValue']> {
-        const values = this.dictionary, indices = this.indices;
-        for (let index = -1, n = indices.length; ++index < n;) {
-            yield values.get(indices.get(index));
+/** @ignore */
+type FromArgs<T extends DataType = any, TKey extends TKeys = TKeys> = [Vector<T>, TKey, ArrayLike<number> | TKey['TArray']];
+
+/** @ignore */
+export class DictionaryVector<T extends DataType = any, TKey extends TKeys = TKeys> extends BaseVector<Dictionary<T, TKey>> {
+    public static from<T extends DataType = any, TKey extends TKeys = TKeys>(...args: FromArgs<T, TKey>): V<Dictionary<T, TKey>>;
+    public static from<T extends DataType = any, TKey extends TKeys = TKeys>(input: VectorBuilderOptions<Dictionary<T, TKey>>): Vector<Dictionary<T, TKey>>;
+    public static from<T extends DataType = any, TKey extends TKeys = TKeys>(input: VectorBuilderOptionsAsync<Dictionary<T, TKey>>): Promise<Vector<Dictionary<T, TKey>>>;
+    /** @nocollapse */
+    public static from<T extends DataType = any, TKey extends TKeys = TKeys>(...args: any[]) {
+        if (args.length === 3) {
+            const [values, indices, keys] = args as FromArgs<T, TKey>;
+            const type = new Dictionary(values.type, indices, null, null);
+            return Vector.new(Data.Dictionary(type, 0, keys.length, 0, null, keys, values));
         }
+        return vectorFromValuesWithType(() => args[0].type, args[0]);
     }
-    public indexOf(search: T['TValue']) {
-        // First find the dictionary key for the desired value...
-        const key = this.dictionary.indexOf(search);
-        if (key === -1) { return key; }
 
-        // ... then find the first occurence of that key in indices
-        return this.indices.indexOf(key!);
+    constructor(data: Data<Dictionary<T, TKey>>) {
+        super(data);
+        this.indices = Vector.new(data.clone(this.type.indices));
     }
+
+    public readonly indices: V<TKey>;
+
+    public get dictionary() { return <Vector<T>> this.data.dictionary; }
+    public reverseLookup(value: T) { return this.dictionary.indexOf(value); }
+    public getKey(idx: number): TKey['TValue'] | null { return this.indices.get(idx); }
+    public getValue(key: number): T['TValue'] | null { return this.dictionary.get(key); }
+    public setKey(idx: number, key: TKey['TValue'] | null) { return this.indices.set(idx, key); }
+    public setValue(key: number, value: T['TValue'] | null) { return this.dictionary.set(key, value); }
 }
+
+(DictionaryVector.prototype as any).indices = null;

@@ -18,28 +18,50 @@
 #ifndef PLASMA_COMMON_H
 #define PLASMA_COMMON_H
 
+#include <stddef.h>
+
 #include <cstring>
+#include <memory>
 #include <string>
 // TODO(pcm): Convert getopt and sscanf in the store to use more idiomatic C++
 // and get rid of the next three lines:
 #ifndef __STDC_FORMAT_MACROS
 #define __STDC_FORMAT_MACROS
 #endif
+#include <unordered_map>
 
 #include "plasma/compat.h"
 
 #include "arrow/status.h"
-#include "arrow/util/logging.h"
+#ifdef PLASMA_CUDA
+#include "arrow/gpu/cuda_api.h"
+#endif
 
 namespace plasma {
 
 enum class ObjectLocation : int32_t { Local, Remote, Nonexistent };
 
+enum class PlasmaErrorCode : int8_t {
+  PlasmaObjectExists = 1,
+  PlasmaObjectNonexistent = 2,
+  PlasmaStoreFull = 3,
+  PlasmaObjectAlreadySealed = 4,
+};
+
+ARROW_EXPORT arrow::Status MakePlasmaError(PlasmaErrorCode code, std::string message);
+/// Return true iff the status indicates an already existing Plasma object.
+ARROW_EXPORT bool IsPlasmaObjectExists(const arrow::Status& status);
+/// Return true iff the status indicates a non-existent Plasma object.
+ARROW_EXPORT bool IsPlasmaObjectNonexistent(const arrow::Status& status);
+/// Return true iff the status indicates an already sealed Plasma object.
+ARROW_EXPORT bool IsPlasmaObjectAlreadySealed(const arrow::Status& status);
+/// Return true iff the status indicates the Plasma store reached its capacity limit.
+ARROW_EXPORT bool IsPlasmaStoreFull(const arrow::Status& status);
+
 constexpr int64_t kUniqueIDSize = 20;
 
 class ARROW_EXPORT UniqueID {
  public:
-  static UniqueID from_random();
   static UniqueID from_binary(const std::string& binary);
   bool operator==(const UniqueID& rhs) const;
   const uint8_t* data() const;
@@ -47,6 +69,7 @@ class ARROW_EXPORT UniqueID {
   std::string binary() const;
   std::string hex() const;
   size_t hash() const;
+  static int64_t size() { return kUniqueIDSize; }
 
  private:
   uint8_t id_[kUniqueIDSize];
@@ -59,29 +82,64 @@ typedef UniqueID ObjectID;
 /// Size of object hash digests.
 constexpr int64_t kDigestSize = sizeof(uint64_t);
 
-enum class ObjectRequestType : int {
-  /// Query for object in the local plasma store.
-  PLASMA_QUERY_LOCAL = 1,
-  /// Query for object in the local plasma store or in a remote plasma store.
-  PLASMA_QUERY_ANYWHERE
+enum class ObjectState : int {
+  /// Object was created but not sealed in the local Plasma Store.
+  PLASMA_CREATED = 1,
+  /// Object is sealed and stored in the local Plasma Store.
+  PLASMA_SEALED = 2,
+  /// Object is evicted to external store.
+  PLASMA_EVICTED = 3,
 };
 
-/// Object request data structure. Used for Wait.
-struct ObjectRequest {
-  /// The ID of the requested object. If ID_NIL request any object.
-  ObjectID object_id;
-  /// Request associated to the object. It can take one of the following values:
-  ///  - PLASMA_QUERY_LOCAL: return if or when the object is available in the
-  ///    local Plasma Store.
-  ///  - PLASMA_QUERY_ANYWHERE: return if or when the object is available in
-  ///    the system (i.e., either in the local or a remote Plasma Store).
-  ObjectRequestType type;
-  /// Object location. This can be
-  ///  - ObjectLocation::Local: object is ready at the local Plasma Store.
-  ///  - ObjectLocation::Remote: object is ready at a remote Plasma Store.
-  ///  - ObjectLocation::Nonexistent: object does not exist in the system.
-  ObjectLocation location;
+namespace internal {
+
+struct CudaIpcPlaceholder {};
+
+}  //  namespace internal
+
+/// This type is used by the Plasma store. It is here because it is exposed to
+/// the eviction policy.
+struct ObjectTableEntry {
+  ObjectTableEntry();
+
+  ~ObjectTableEntry();
+
+  /// Memory mapped file containing the object.
+  int fd;
+  /// Device number.
+  int device_num;
+  /// Size of the underlying map.
+  int64_t map_size;
+  /// Offset from the base of the mmap.
+  ptrdiff_t offset;
+  /// Pointer to the object data. Needed to free the object.
+  uint8_t* pointer;
+  /// Size of the object in bytes.
+  int64_t data_size;
+  /// Size of the object metadata in bytes.
+  int64_t metadata_size;
+  /// Number of clients currently using this object.
+  int ref_count;
+  /// Unix epoch of when this object was created.
+  int64_t create_time;
+  /// How long creation of this object took.
+  int64_t construct_duration;
+
+  /// The state of the object, e.g., whether it is open or sealed.
+  ObjectState state;
+  /// The digest of the object. Used to see if two objects are the same.
+  unsigned char digest[kDigestSize];
+
+#ifdef PLASMA_CUDA
+  /// IPC GPU handle to share with clients.
+  std::shared_ptr<::arrow::cuda::CudaIpcMemHandle> ipc_handle;
+#else
+  std::shared_ptr<internal::CudaIpcPlaceholder> ipc_handle;
+#endif
 };
+
+/// Mapping from ObjectIDs to information about the object.
+typedef std::unordered_map<ObjectID, std::unique_ptr<ObjectTableEntry>> ObjectTable;
 
 /// Globally accessible reference to plasma store configuration.
 /// TODO(pcm): This can be avoided with some refactoring of existing code

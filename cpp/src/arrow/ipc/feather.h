@@ -24,14 +24,16 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "arrow/util/visibility.h"
 
 namespace arrow {
 
 class Array;
-class Column;
+class ChunkedArray;
 class Status;
+class Table;
 
 namespace io {
 
@@ -82,14 +84,40 @@ class ARROW_EXPORT TableReader {
 
   std::string GetColumnName(int i) const;
 
-  /// \brief Read a column from the file as an arrow::Column.
+  /// \brief Read a column from the file as an arrow::ChunkedArray.
   ///
   /// \param[in] i the column index to read
   /// \param[out] out the returned column
   /// \return Status
   ///
   /// This function is zero-copy if the file source supports zero-copy reads
-  Status GetColumn(int i, std::shared_ptr<Column>* out);
+  Status GetColumn(int i, std::shared_ptr<ChunkedArray>* out);
+
+  /// \brief Read all columns from the file as an arrow::Table.
+  ///
+  /// \param[out] out the returned table
+  /// \return Status
+  ///
+  /// This function is zero-copy if the file source supports zero-copy reads
+  Status Read(std::shared_ptr<Table>* out);
+
+  /// \brief Read only the specified columns from the file as an arrow::Table.
+  ///
+  /// \param[in] indices the column indices to read
+  /// \param[out] out the returned table
+  /// \return Status
+  ///
+  /// This function is zero-copy if the file source supports zero-copy reads
+  Status Read(const std::vector<int>& indices, std::shared_ptr<Table>* out);
+
+  /// \brief Read only the specified columns from the file as an arrow::Table.
+  ///
+  /// \param[in] names the column names to read
+  /// \param[out] out the returned table
+  /// \return Status
+  ///
+  /// This function is zero-copy if the file source supports zero-copy reads
+  Status Read(const std::vector<std::string>& names, std::shared_ptr<Table>* out);
 
  private:
   class ARROW_NO_EXPORT TableReaderImpl;
@@ -121,6 +149,12 @@ class ARROW_EXPORT TableWriter {
   /// \param[in] values the column values as a contiguous arrow::Array
   /// \return Status
   Status Append(const std::string& name, const Array& values);
+
+  /// \brief Write a table to the file
+  ///
+  /// \param[in] table the table to be written
+  /// \return Status
+  Status Write(const Table& table);
 
   /// \brief Finalize the file by writing the file metadata and footer
   /// \return Status

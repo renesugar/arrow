@@ -15,18 +15,45 @@
 # specific language governing permissions and limitations
 # under the License.
 
+require "arrow/column-containable"
 require "arrow/record-containable"
 
 module Arrow
   class RecordBatch
+    include ColumnContainable
     include RecordContainable
     include Enumerable
 
+    class << self
+      def new(*args)
+        n_args = args.size
+        case n_args
+        when 2
+          schema, data = args
+          RecordBatchBuilder.build(schema, data)
+        when 3
+          super
+        else
+          message = "wrong number of arguments (given #{n_args}, expected 2..3)"
+          raise ArgumentError, message
+        end
+      end
+    end
+
     alias_method :each, :each_record
 
-    alias_method :columns_raw, :columns
-    def columns
-      @columns ||= columns_raw
+    alias_method :size, :n_rows
+    alias_method :length, :n_rows
+
+    alias_method :[], :find_column
+
+    # Converts the record batch to {Arrow::Table}.
+    #
+    # @return [Arrow::Table]
+    #
+    # @since 0.12.0
+    def to_table
+      Table.new(schema, [self])
     end
 
     def respond_to_missing?(name, include_private)

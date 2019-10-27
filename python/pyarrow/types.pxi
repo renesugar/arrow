@@ -15,8 +15,13 @@
 # specific language governing permissions and limitations
 # under the License.
 
-import collections
+import atexit
 import re
+import warnings
+
+from pyarrow import compat
+from pyarrow.compat import builtin_pickle
+
 
 # These are imprecise because the type (in pandas 0.x) depends on the presence
 # of nulls
@@ -37,6 +42,7 @@ cdef dict _pandas_type_map = {
     _Type_DATE32: np.dtype('datetime64[ns]'),
     _Type_DATE64: np.dtype('datetime64[ns]'),
     _Type_TIMESTAMP: np.dtype('datetime64[ns]'),
+    _Type_DURATION: np.dtype('timedelta64[ns]'),
     _Type_BINARY: np.object_,
     _Type_FIXED_SIZE_BINARY: np.object_,
     _Type_STRING: np.object_,
@@ -88,7 +94,9 @@ ctypedef CFixedWidthType* _CFixedWidthTypePtr
 
 cdef class DataType:
     """
-    Base type for Apache Arrow data type instances. Wraps C++ arrow::DataType
+    Base class of all Arrow data types.
+
+    Each data type is an *instance* of this class.
     """
     def __cinit__(self):
         pass
@@ -98,10 +106,15 @@ cdef class DataType:
                         "functions like pyarrow.int64, pyarrow.list_, etc. "
                         "instead.".format(self.__class__.__name__))
 
-    cdef void init(self, const shared_ptr[CDataType]& type):
+    cdef void init(self, const shared_ptr[CDataType]& type) except *:
+        assert type != nullptr
         self.sp_type = type
         self.type = type.get()
         self.pep3118_format = _datatype_to_pep3118(self.type)
+
+    cdef Field child(self, int i):
+        cdef int index = <int> _normalize_index(i, self.type.num_children())
+        return pyarrow_wrap_field(self.type.child(index))
 
     @property
     def id(self):
@@ -114,6 +127,21 @@ cdef class DataType:
         if ty == nullptr:
             raise ValueError("Non-fixed width type")
         return ty.bit_width()
+
+    @property
+    def num_children(self):
+        """
+        The number of child fields.
+        """
+        return self.type.num_children()
+
+    @property
+    def num_buffers(self):
+        """
+        Number of data buffers required to construct Array type
+        excluding children
+        """
+        return self.type.layout().bit_widths.size()
 
     def __str__(self):
         return frombytes(self.type.ToString())
@@ -158,7 +186,7 @@ cdef class DataType:
 
     def to_pandas_dtype(self):
         """
-        Return the NumPy dtype that would be used for storing this
+        Return the equivalent NumPy / Pandas dtype.
         """
         cdef Type type_id = self.type.id()
         if type_id in _pandas_type_map:
@@ -167,31 +195,57 @@ cdef class DataType:
             raise NotImplementedError(str(self))
 
 
-cdef class DictionaryType(DataType):
+cdef class DictionaryMemo:
+    """
+    Tracking container for dictionary-encoded fields
+    """
+    def __cinit__(self):
+        self.sp_memo.reset(new CDictionaryMemo())
+        self.memo = self.sp_memo.get()
 
-    cdef void init(self, const shared_ptr[CDataType]& type):
+
+cdef class DictionaryType(DataType):
+    """
+    Concrete class for dictionary data types.
+    """
+
+    cdef void init(self, const shared_ptr[CDataType]& type) except *:
         DataType.init(self, type)
         self.dict_type = <const CDictionaryType*> type.get()
 
     def __reduce__(self):
-        return dictionary, (self.index_type, self.dictionary, self.ordered)
+        return dictionary, (self.index_type, self.value_type, self.ordered)
 
     @property
     def ordered(self):
+        """
+        Whether the dictionary is ordered, i.e. whether the ordering of values
+        in the dictionary is important.
+        """
         return self.dict_type.ordered()
 
     @property
     def index_type(self):
+        """
+        The data type of dictionary indices (a signed integer type).
+        """
         return pyarrow_wrap_data_type(self.dict_type.index_type())
 
     @property
-    def dictionary(self):
-        return pyarrow_wrap_array(self.dict_type.dictionary())
+    def value_type(self):
+        """
+        The dictionary value type. The dictionary values are found in an
+        instance of DictionaryArray
+        """
+        return pyarrow_wrap_data_type(self.dict_type.value_type())
 
 
 cdef class ListType(DataType):
+    """
+    Concrete class for list data types.
+    """
 
-    cdef void init(self, const shared_ptr[CDataType]& type):
+    cdef void init(self, const shared_ptr[CDataType]& type) except *:
         DataType.init(self, type)
         self.list_type = <const CListType*> type.get()
 
@@ -200,44 +254,105 @@ cdef class ListType(DataType):
 
     @property
     def value_type(self):
+        """
+        The data type of list values.
+        """
+        return pyarrow_wrap_data_type(self.list_type.value_type())
+
+
+cdef class LargeListType(DataType):
+    """
+    Concrete class for large list data types
+    (like ListType, but with 64-bit offsets).
+    """
+
+    cdef void init(self, const shared_ptr[CDataType]& type) except *:
+        DataType.init(self, type)
+        self.list_type = <const CLargeListType*> type.get()
+
+    def __reduce__(self):
+        return large_list, (self.value_type,)
+
+    @property
+    def value_type(self):
+        """
+        The data type of large list values.
+        """
         return pyarrow_wrap_data_type(self.list_type.value_type())
 
 
 cdef class StructType(DataType):
+    """
+    Concrete class for struct data types.
+    """
 
-    cdef void init(self, const shared_ptr[CDataType]& type):
+    cdef void init(self, const shared_ptr[CDataType]& type) except *:
         DataType.init(self, type)
+        self.struct_type = <const CStructType*> type.get()
+
+    cdef Field field(self, int i):
+        """
+        Return a child field by its index.
+        """
+        return self.child(i)
+
+    cdef Field field_by_name(self, name):
+        """
+        Return a child field by its name rather than its index.
+        """
+        cdef vector[shared_ptr[CField]] fields
+
+        fields = self.struct_type.GetAllFieldsByName(tobytes(name))
+        if fields.size() == 0:
+            raise KeyError(name)
+        elif fields.size() > 1:
+            warnings.warn("Struct field name corresponds to more "
+                          "than one field", UserWarning)
+            raise KeyError(name)
+        else:
+            return pyarrow_wrap_field(fields[0])
 
     def __len__(self):
+        """
+        Like num_children().
+        """
         return self.type.num_children()
 
     def __iter__(self):
+        """
+        Iterate over struct fields, in order.
+        """
         for i in range(len(self)):
             yield self[i]
 
     def __getitem__(self, i):
-        cdef int index = <int> _normalize_index(i, self.num_children)
-        return pyarrow_wrap_field(self.type.child(index))
+        """
+        Return the struct field with the given index or name.
+        """
+        if isinstance(i, six.string_types):
+            return self.field_by_name(i)
+        elif isinstance(i, six.integer_types):
+            return self.child(i)
+        else:
+            raise TypeError('Expected integer or string index')
 
     def __reduce__(self):
         return struct, (list(self),)
 
-    @property
-    def num_children(self):
-        return self.type.num_children()
-
 
 cdef class UnionType(DataType):
+    """
+    Concrete class for struct data types.
+    """
 
-    cdef void init(self, const shared_ptr[CDataType]& type):
+    cdef void init(self, const shared_ptr[CDataType]& type) except *:
         DataType.init(self, type)
 
     @property
-    def num_children(self):
-        return self.type.num_children()
-
-    @property
     def mode(self):
+        """
+        The mode of the union ("dense" or "sparse").
+        """
         cdef CUnionType* type = <CUnionType*> self.sp_type.get()
         cdef int mode = type.mode()
         if mode == _UnionMode_DENSE:
@@ -246,33 +361,58 @@ cdef class UnionType(DataType):
             return 'sparse'
         assert 0
 
+    @property
+    def type_codes(self):
+        """
+        The type code to indicate each data type in this union.
+        """
+        cdef CUnionType* type = <CUnionType*> self.sp_type.get()
+        return type.type_codes()
+
     def __len__(self):
+        """
+        Like num_children()
+        """
         return self.type.num_children()
 
     def __iter__(self):
+        """
+        Iterate over union members, in order.
+        """
         for i in range(len(self)):
             yield self[i]
 
     def __getitem__(self, i):
-        cdef int index = <int> _normalize_index(i, self.num_children)
-        return pyarrow_wrap_field(self.type.child(index))
+        """
+        Return a child member by its index.
+        """
+        return self.child(i)
 
     def __reduce__(self):
         return union, (list(self), self.mode)
 
 
 cdef class TimestampType(DataType):
+    """
+    Concrete class for timestamp data types.
+    """
 
-    cdef void init(self, const shared_ptr[CDataType]& type):
+    cdef void init(self, const shared_ptr[CDataType]& type) except *:
         DataType.init(self, type)
         self.ts_type = <const CTimestampType*> type.get()
 
     @property
     def unit(self):
+        """
+        The timestamp unit ('s', 'ms', 'us' or 'ns').
+        """
         return timeunit_to_string(self.ts_type.unit())
 
     @property
     def tz(self):
+        """
+        The timestamp time zone, if any, or None.
+        """
         if self.ts_type.timezone().size() > 0:
             return frombytes(self.ts_type.timezone())
         else:
@@ -280,43 +420,76 @@ cdef class TimestampType(DataType):
 
     def to_pandas_dtype(self):
         """
-        Return the NumPy dtype that would be used for storing this
+        Return the equivalent NumPy / Pandas dtype.
         """
         if self.tz is None:
             return _pandas_type_map[_Type_TIMESTAMP]
         else:
             # Return DatetimeTZ
-            return pdcompat.make_datetimetz(self.tz)
+            from pyarrow.pandas_compat import make_datetimetz
+            return make_datetimetz(self.tz)
 
     def __reduce__(self):
         return timestamp, (self.unit, self.tz)
 
 
 cdef class Time32Type(DataType):
+    """
+    Concrete class for time32 data types.
+    """
 
-    cdef void init(self, const shared_ptr[CDataType]& type):
+    cdef void init(self, const shared_ptr[CDataType]& type) except *:
         DataType.init(self, type)
         self.time_type = <const CTime32Type*> type.get()
 
     @property
     def unit(self):
+        """
+        The time unit ('s', 'ms', 'us' or 'ns').
+        """
         return timeunit_to_string(self.time_type.unit())
 
 
 cdef class Time64Type(DataType):
+    """
+    Concrete class for time64 data types.
+    """
 
-    cdef void init(self, const shared_ptr[CDataType]& type):
+    cdef void init(self, const shared_ptr[CDataType]& type) except *:
         DataType.init(self, type)
         self.time_type = <const CTime64Type*> type.get()
 
     @property
     def unit(self):
+        """
+        The time unit ('s', 'ms', 'us' or 'ns').
+        """
         return timeunit_to_string(self.time_type.unit())
 
 
-cdef class FixedSizeBinaryType(DataType):
+cdef class DurationType(DataType):
+    """
+    Concrete class for duration data types.
+    """
 
-    cdef void init(self, const shared_ptr[CDataType]& type):
+    cdef void init(self, const shared_ptr[CDataType]& type) except *:
+        DataType.init(self, type)
+        self.duration_type = <const CDurationType*> type.get()
+
+    @property
+    def unit(self):
+        """
+        The duration unit ('s', 'ms', 'us' or 'ns').
+        """
+        return timeunit_to_string(self.duration_type.unit())
+
+
+cdef class FixedSizeBinaryType(DataType):
+    """
+    Concrete class for fixed-size binary data types.
+    """
+
+    cdef void init(self, const shared_ptr[CDataType]& type) except *:
         DataType.init(self, type)
         self.fixed_size_binary_type = (
             <const CFixedSizeBinaryType*> type.get())
@@ -326,12 +499,18 @@ cdef class FixedSizeBinaryType(DataType):
 
     @property
     def byte_width(self):
+        """
+        The binary size in bytes.
+        """
         return self.fixed_size_binary_type.byte_width()
 
 
 cdef class Decimal128Type(FixedSizeBinaryType):
+    """
+    Concrete class for decimal128 data types.
+    """
 
-    cdef void init(self, const shared_ptr[CDataType]& type):
+    cdef void init(self, const shared_ptr[CDataType]& type) except *:
         FixedSizeBinaryType.init(self, type)
         self.decimal128_type = <const CDecimal128Type*> type.get()
 
@@ -340,17 +519,224 @@ cdef class Decimal128Type(FixedSizeBinaryType):
 
     @property
     def precision(self):
+        """
+        The decimal precision, in number of decimal digits (an integer).
+        """
         return self.decimal128_type.precision()
 
     @property
     def scale(self):
+        """
+        The decimal scale (an integer).
+        """
         return self.decimal128_type.scale()
+
+
+cdef class BaseExtensionType(DataType):
+    """
+    Concrete base class for extension types.
+    """
+
+    cdef void init(self, const shared_ptr[CDataType]& type) except *:
+        DataType.init(self, type)
+        self.ext_type = <const CExtensionType*> type.get()
+
+    @property
+    def extension_name(self):
+        """
+        The extension type name.
+        """
+        return frombytes(self.ext_type.extension_name())
+
+    @property
+    def storage_type(self):
+        """
+        The underlying storage type.
+        """
+        return pyarrow_wrap_data_type(self.ext_type.storage_type())
+
+
+cdef class ExtensionType(BaseExtensionType):
+    """
+    Concrete base class for Python-defined extension types.
+    """
+
+    def __cinit__(self):
+        if type(self) is ExtensionType:
+            raise TypeError("Can only instantiate subclasses of "
+                            "ExtensionType")
+
+    def __init__(self, DataType storage_type, extension_name):
+        """
+        Initialize an extension type instance.
+
+        This should be called at the end of the subclass'
+        ``__init__`` method.
+
+        Parameters
+        ----------
+        storage_type : DataType
+        extension_name : str
+        """
+        cdef:
+            shared_ptr[CExtensionType] cpy_ext_type
+            c_string c_extension_name
+
+        c_extension_name = tobytes(extension_name)
+
+        assert storage_type is not None
+        check_status(CPyExtensionType.FromClass(
+            storage_type.sp_type, c_extension_name, type(self),
+            &cpy_ext_type))
+        self.init(<shared_ptr[CDataType]> cpy_ext_type)
+
+    cdef void init(self, const shared_ptr[CDataType]& type) except *:
+        BaseExtensionType.init(self, type)
+        self.cpy_ext_type = <const CPyExtensionType*> type.get()
+        # Store weakref and serialized version of self on C++ type instance
+        check_status(self.cpy_ext_type.SetInstance(self))
+
+    def __eq__(self, other):
+        # Default implementation to avoid infinite recursion through
+        # DataType.__eq__ -> ExtensionType::ExtensionEquals -> DataType.__eq__
+        if isinstance(other, ExtensionType):
+            return (type(self) == type(other) and
+                    self.extension_name == other.extension_name and
+                    self.storage_type == other.storage_type)
+        else:
+            return NotImplemented
+
+    def __arrow_ext_serialize__(self):
+        """
+        Serialized representation of metadata to reconstruct the type object.
+
+        This method should return a bytes object, and those serialized bytes
+        are stored in the custom metadata of the Field holding an extension
+        type in an IPC message.
+        The bytes are passed to ``__arrow_ext_deserialize`` and should hold
+        sufficient information to reconstruct the data type instance.
+        """
+        return NotImplementedError
+
+    @classmethod
+    def __arrow_ext_deserialize__(self, storage_type, serialized):
+        """
+        Return an extension type instance from the storage type and serialized
+        metadata.
+
+        This method should return an instance of the ExtensionType subclass
+        that matches the passed storage type and serialized metadata (the
+        return value of ``__arrow_ext_serialize__``).
+        """
+        return NotImplementedError
+
+
+cdef class PyExtensionType(ExtensionType):
+    """
+    Concrete base class for Python-defined extension types based on pickle
+    for (de)serialization.
+    """
+
+    def __cinit__(self):
+        if type(self) is PyExtensionType:
+            raise TypeError("Can only instantiate subclasses of "
+                            "PyExtensionType")
+
+    def __init__(self, DataType storage_type):
+        ExtensionType.__init__(self, storage_type, "arrow.py_extension_type")
+
+    def __reduce__(self):
+        raise NotImplementedError("Please implement {0}.__reduce__"
+                                  .format(type(self).__name__))
+
+    def __arrow_ext_serialize__(self):
+        return builtin_pickle.dumps(self)
+
+    @classmethod
+    def __arrow_ext_deserialize__(cls, storage_type, serialized):
+        try:
+            ty = builtin_pickle.loads(serialized)
+        except Exception:
+            # For some reason, it's impossible to deserialize the
+            # ExtensionType instance.  Perhaps the serialized data is
+            # corrupt, or more likely the type is being deserialized
+            # in an environment where the original Python class or module
+            # is not available.  Fall back on a generic BaseExtensionType.
+            return UnknownExtensionType(storage_type, serialized)
+
+        if ty.storage_type != storage_type:
+            raise TypeError("Expected storage type {0} but got {1}"
+                            .format(ty.storage_type, storage_type))
+        return ty
+
+
+cdef class UnknownExtensionType(PyExtensionType):
+    """
+    A concrete class for Python-defined extension types that refer to
+    an unknown Python implementation.
+    """
+
+    cdef:
+        bytes serialized
+
+    def __init__(self, DataType storage_type, serialized):
+        self.serialized = serialized
+        PyExtensionType.__init__(self, storage_type)
+
+    def __arrow_ext_serialize__(self):
+        return self.serialized
+
+
+_python_extension_types_registry = []
+
+
+def register_extension_type(ext_type):
+    """
+    Register a Python extension type.
+
+    Registration is based on the extension name (so different registered types
+    need unique extension names). Registration needs an extension type
+    instance, but then works for any instance of the same subclass regardless
+    of parametrization of the type.
+
+    Parameters
+    ----------
+    ext_type : BaseExtensionType instance
+        The ExtensionType subclass to register.
+
+    """
+    cdef:
+        DataType _type = ensure_type(ext_type, allow_none=False)
+
+    if not isinstance(_type, BaseExtensionType):
+        raise TypeError("Only extension types can be registered")
+
+    # register on the C++ side
+    check_status(
+        RegisterPyExtensionType(<shared_ptr[CDataType]> _type.sp_type))
+
+    # register on the python side
+    _python_extension_types_registry.append(_type)
+
+
+def unregister_extension_type(type_name):
+    """
+    Unregister a Python extension type.
+
+    Parameters
+    ----------
+    type_name : str
+        The name of the ExtensionType subclass to unregister.
+
+    """
+    cdef:
+        c_string c_type_name = tobytes(type_name)
+    check_status(UnregisterPyExtensionType(c_type_name))
 
 
 cdef class Field:
     """
-    Represents a named field, with a data type, nullability, and optional
-    metadata
+    A named field, with a data type, nullability, and optional metadata.
 
     Notes
     -----
@@ -375,8 +761,6 @@ cdef class Field:
         Parameters
         ----------
         other : pyarrow.Field
-        check_metadata : boolean, default True
-            Key/value metadata must be equal too
 
         Returns
         -------
@@ -412,11 +796,14 @@ cdef class Field:
 
     @property
     def metadata(self):
-        cdef shared_ptr[const CKeyValueMetadata] metadata = (
-            self.field.metadata())
-        return box_metadata(metadata.get())
+        return pyarrow_wrap_metadata(self.field.metadata())
 
-    def add_metadata(self, dict metadata):
+    def add_metadata(self, metadata):
+        warnings.warn("The 'add_metadata' method is deprecated, use "
+                      "'with_metadata' instead", FutureWarning, stacklevel=2)
+        return self.with_metadata(metadata)
+
+    def with_metadata(self, metadata):
         """
         Add metadata as dict of string keys and values to Field
 
@@ -429,14 +816,18 @@ cdef class Field:
         -------
         field : pyarrow.Field
         """
-        cdef shared_ptr[CKeyValueMetadata] c_meta
-        convert_metadata(metadata, &c_meta)
+        cdef:
+            shared_ptr[CField] c_field
+            shared_ptr[CKeyValueMetadata] c_meta
 
-        cdef shared_ptr[CField] new_field
+        if not isinstance(metadata, dict):
+            raise TypeError('Metadata must be an instance of dict')
+
+        c_meta = pyarrow_unwrap_metadata(metadata)
         with nogil:
-            new_field = self.field.AddMetadata(c_meta)
+            c_field = self.field.WithMetadata(c_meta)
 
-        return pyarrow_wrap_field(new_field)
+        return pyarrow_wrap_field(c_field)
 
     def remove_metadata(self):
         """
@@ -479,8 +870,8 @@ cdef class Schema:
         return self.schema.num_fields()
 
     def __getitem__(self, key):
-        cdef int index = <int> _normalize_index(key, self.schema.num_fields())
-        return pyarrow_wrap_field(self.schema.field(index))
+        # access by integer index
+        return self._field(key)
 
     def __iter__(self):
         for i in range(len(self)):
@@ -496,6 +887,22 @@ cdef class Schema:
 
     def __reduce__(self):
         return schema, (list(self), self.metadata)
+
+    def __hash__(self):
+        return hash((tuple(self), self.metadata))
+
+    @property
+    def pandas_metadata(self):
+        """
+        Return deserialized-from-JSON pandas metadata field (if it exists)
+        """
+        metadata = self.metadata
+        key = b'pandas'
+        if metadata is None or key not in metadata:
+            return None
+
+        import json
+        return json.loads(metadata[key].decode('utf8'))
 
     @property
     def names(self):
@@ -526,9 +933,7 @@ cdef class Schema:
 
     @property
     def metadata(self):
-        cdef shared_ptr[const CKeyValueMetadata] metadata = (
-            self.schema.metadata())
-        return box_metadata(metadata.get())
+        return pyarrow_wrap_metadata(self.schema.metadata())
 
     def __eq__(self, other):
         try:
@@ -536,7 +941,26 @@ cdef class Schema:
         except TypeError:
             return NotImplemented
 
-    def equals(self, other, bint check_metadata=True):
+    def empty_table(self):
+        """
+        Provide an empty table according to the schema.
+
+        Returns
+        -------
+        table: pyarrow.Table
+        """
+        arrays = []
+        names = []
+        for field in self:
+            arrays.append(array([], type=field.type))
+            names.append(field.name)
+        return Table.from_arrays(
+            arrays=arrays,
+            names=names,
+            metadata=self.metadata
+        )
+
+    def equals(self, Schema other not None, bint check_metadata=True):
         """
         Test if this schema is equal to the other
 
@@ -550,9 +974,79 @@ cdef class Schema:
         -------
         is_equal : boolean
         """
-        cdef Schema _other = other
-        return self.sp_schema.get().Equals(deref(_other.schema),
+        return self.sp_schema.get().Equals(deref(other.schema),
                                            check_metadata)
+
+    @classmethod
+    def from_pandas(cls, df, preserve_index=None):
+        """
+        Returns implied schema from dataframe
+
+        Parameters
+        ----------
+        df : pandas.DataFrame
+        preserve_index : bool, default True
+            Whether to store the index as an additional column (or columns, for
+            MultiIndex) in the resulting `Table`.
+            The default of None will store the index as a column, except for
+            RangeIndex which is stored as metadata only. Use
+            ``preserve_index=True`` to force it to be stored as a column.
+
+        Returns
+        -------
+        pyarrow.Schema
+
+        Examples
+        --------
+
+        >>> import pandas as pd
+        >>> import pyarrow as pa
+        >>> df = pd.DataFrame({
+            ...     'int': [1, 2],
+            ...     'str': ['a', 'b']
+            ... })
+        >>> pa.Schema.from_pandas(df)
+        int: int64
+        str: string
+        __index_level_0__: int64
+        """
+        from pyarrow.pandas_compat import dataframe_to_types
+        names, types, metadata = dataframe_to_types(
+            df,
+            preserve_index=preserve_index
+        )
+        fields = []
+        for name, type_ in zip(names, types):
+            fields.append(field(name, type_))
+        return schema(fields, metadata)
+
+    def field(self, i):
+        """
+        Select a field by its column name or numeric index.
+
+        Parameters
+        ----------
+        i : int or string
+
+        Returns
+        -------
+        pyarrow.Field
+        """
+        if isinstance(i, six.string_types):
+            field_index = self.get_field_index(i)
+            if field_index < 0:
+                raise KeyError("Column {} does not exist in schema".format(i))
+            else:
+                return self._field(field_index)
+        elif isinstance(i, six.integer_types):
+            return self._field(i)
+        else:
+            raise TypeError("Index must either be string or integer")
+
+    def _field(self, int i):
+        """Select a field by its numeric index."""
+        cdef int index = <int> _normalize_index(i, self.schema.num_fields())
+        return pyarrow_wrap_field(self.schema.field(index))
 
     def field_by_name(self, name):
         """
@@ -566,7 +1060,22 @@ cdef class Schema:
         -------
         field: pyarrow.Field
         """
-        return pyarrow_wrap_field(self.schema.GetFieldByName(tobytes(name)))
+        cdef:
+            vector[shared_ptr[CField]] results
+
+        warnings.warn(
+            "The 'field_by_name' method is deprecated, use 'field' instead",
+            FutureWarning, stacklevel=2)
+
+        results = self.schema.GetAllFieldsByName(tobytes(name))
+        if results.size() == 0:
+            return None
+        elif results.size() > 1:
+            warnings.warn("Schema field name corresponds to more "
+                          "than one field", UserWarning)
+            return None
+        else:
+            return pyarrow_wrap_field(results[0])
 
     def get_field_index(self, name):
         return self.schema.GetFieldIndex(tobytes(name))
@@ -575,6 +1084,9 @@ cdef class Schema:
         """
         Append a field at the end of the schema.
 
+        In contrast to Python's ``list.append()`` it does return a new
+        object, leaving the original Schema unmodified.
+
         Parameters
         ----------
         field: Field
@@ -582,6 +1094,7 @@ cdef class Schema:
         Returns
         -------
         schema: Schema
+            New object with appended field.
         """
         return self.insert(self.schema.num_fields(), field)
 
@@ -652,7 +1165,12 @@ cdef class Schema:
 
         return pyarrow_wrap_schema(new_schema)
 
-    def add_metadata(self, dict metadata):
+    def add_metadata(self, metadata):
+        warnings.warn("The 'add_metadata' method is deprecated, use "
+                      "'with_metadata' instead", FutureWarning, stacklevel=2)
+        return self.with_metadata(metadata)
+
+    def with_metadata(self, metadata):
         """
         Add metadata as dict of string keys and values to Schema
 
@@ -665,16 +1183,20 @@ cdef class Schema:
         -------
         schema : pyarrow.Schema
         """
-        cdef shared_ptr[CKeyValueMetadata] c_meta
-        convert_metadata(metadata, &c_meta)
+        cdef:
+            shared_ptr[CKeyValueMetadata] c_meta
+            shared_ptr[CSchema] c_schema
 
-        cdef shared_ptr[CSchema] new_schema
+        if not isinstance(metadata, dict):
+            raise TypeError('Metadata must be an instance of dict')
+
+        c_meta = pyarrow_unwrap_metadata(metadata)
         with nogil:
-            new_schema = self.schema.AddMetadata(c_meta)
+            c_schema = self.schema.WithMetadata(c_meta)
 
-        return pyarrow_wrap_schema(new_schema)
+        return pyarrow_wrap_schema(c_schema)
 
-    def serialize(self, memory_pool=None):
+    def serialize(self, DictionaryMemo dictionary_memo=None, memory_pool=None):
         """
         Write Schema to Buffer as encapsulated IPC message
 
@@ -682,6 +1204,10 @@ cdef class Schema:
         ----------
         memory_pool : MemoryPool, default None
             Uses default memory pool if not specified
+        dictionary_memo : DictionaryMemo, optional
+            If schema contains dictionaries, must pass a
+            DictionaryMemo to be able to deserialize RecordBatch
+            objects
 
         Returns
         -------
@@ -690,9 +1216,16 @@ cdef class Schema:
         cdef:
             shared_ptr[CBuffer] buffer
             CMemoryPool* pool = maybe_unbox_memory_pool(memory_pool)
+            CDictionaryMemo temp_memo
+            CDictionaryMemo* arg_dict_memo
+
+        if dictionary_memo is not None:
+            arg_dict_memo = dictionary_memo.memo
+        else:
+            arg_dict_memo = &temp_memo
 
         with nogil:
-            check_status(SerializeSchema(deref(self.schema),
+            check_status(SerializeSchema(deref(self.schema), arg_dict_memo,
                                          pool, &buffer))
         return pyarrow_wrap_buffer(buffer)
 
@@ -734,15 +1267,6 @@ cdef class Schema:
         return self.__str__()
 
 
-cdef dict box_metadata(const CKeyValueMetadata* metadata):
-    cdef unordered_map[c_string, c_string] result
-    if metadata != nullptr:
-        metadata.ToUnorderedMap(&result)
-        return result
-    else:
-        return None
-
-
 cdef dict _type_cache = {}
 
 
@@ -756,25 +1280,12 @@ cdef DataType primitive_type(Type type):
     _type_cache[type] = out
     return out
 
+
 # -----------------------------------------------------------
 # Type factory functions
 
-cdef int convert_metadata(dict metadata,
-                          shared_ptr[CKeyValueMetadata]* out) except -1:
-    cdef:
-        shared_ptr[CKeyValueMetadata] meta = (
-            make_shared[CKeyValueMetadata]())
-        c_string key, value
 
-    for py_key, py_value in metadata.items():
-        key = tobytes(py_key)
-        value = tobytes(py_value)
-        meta.get().Append(key, value)
-    out[0] = meta
-    return 0
-
-
-def field(name, type, bint nullable=True, dict metadata=None):
+def field(name, type, bint nullable=True, metadata=None):
     """
     Create a pyarrow.Field instance
 
@@ -791,28 +1302,22 @@ def field(name, type, bint nullable=True, dict metadata=None):
     field : pyarrow.Field
     """
     cdef:
-        shared_ptr[CKeyValueMetadata] c_meta
         Field result = Field.__new__(Field)
-        DataType _type
+        DataType _type = ensure_type(type, allow_none=False)
+        shared_ptr[CKeyValueMetadata] c_meta
 
     if metadata is not None:
-        convert_metadata(metadata, &c_meta)
+        if not isinstance(metadata, dict):
+            raise TypeError('Metadata must be an instance of dict')
+        c_meta = pyarrow_unwrap_metadata(metadata)
 
-    _type = _as_type(type)
-
-    result.sp_field.reset(new CField(tobytes(name), _type.sp_type,
-                                     nullable == 1, c_meta))
+    result.sp_field.reset(
+        new CField(tobytes(name), _type.sp_type, nullable, c_meta)
+    )
     result.field = result.sp_field.get()
     result.type = _type
+
     return result
-
-
-cdef _as_type(type):
-    if isinstance(type, DataType):
-        return type
-    if not isinstance(type, six.string_types):
-        raise TypeError(type)
-    return type_for_alias(type)
 
 
 cdef set PRIMITIVE_TYPES = set([
@@ -901,6 +1406,7 @@ def int64():
 
 cdef dict _timestamp_type_cache = {}
 cdef dict _time_type_cache = {}
+cdef dict _duration_type_cache = {}
 
 
 cdef timeunit_to_string(TimeUnit unit):
@@ -935,12 +1441,32 @@ def tzinfo_to_string(tz):
       name : string
         Time zone name
     """
-    if tz.zone is None:
-        sign = '+' if tz._minutes >= 0 else '-'
-        hours, minutes = divmod(abs(tz._minutes), 60)
+    import pytz
+    import datetime
+
+    def fixed_offset_to_string(offset):
+        seconds = int(offset.utcoffset(None).total_seconds())
+        sign = '+' if seconds >= 0 else '-'
+        minutes, seconds = divmod(abs(seconds), 60)
+        hours, minutes = divmod(minutes, 60)
+        if seconds > 0:
+            raise ValueError('Offset must represent whole number of minutes')
         return '{}{:02d}:{:02d}'.format(sign, hours, minutes)
-    else:
+
+    if tz is pytz.utc:
+        return tz.zone  # ARROW-4055
+    elif isinstance(tz, pytz.tzinfo.BaseTzInfo):
         return tz.zone
+    elif isinstance(tz, pytz._FixedOffset):
+        return fixed_offset_to_string(tz)
+    elif isinstance(tz, datetime.tzinfo):
+        if six.PY3 and isinstance(tz, datetime.timezone):
+            return fixed_offset_to_string(tz)
+        else:
+            raise ValueError('Unable to convert timezone `{}` to string'
+                             .format(tz))
+    else:
+        raise TypeError('Must be an instance of `datetime.tzinfo`')
 
 
 def string_to_tzinfo(name):
@@ -1102,6 +1628,48 @@ def time64(unit):
     return out
 
 
+def duration(unit):
+    """
+    Create instance of a duration type with unit resolution.
+
+    Parameters
+    ----------
+    unit : string
+        one of 's' [second], 'ms' [millisecond], 'us' [microsecond], or 'ns'
+        [nanosecond]
+
+    Examples
+    --------
+    ::
+
+        t1 = pa.duration('us')
+        t2 = pa.duration('s')
+    """
+    cdef:
+        TimeUnit unit_code
+
+    if unit == "s":
+        unit_code = TimeUnit_SECOND
+    elif unit == 'ms':
+        unit_code = TimeUnit_MILLI
+    elif unit == 'us':
+        unit_code = TimeUnit_MICRO
+    elif unit == 'ns':
+        unit_code = TimeUnit_NANO
+    else:
+        raise ValueError('Invalid TimeUnit string')
+
+    if unit_code in _duration_type_cache:
+        return _duration_type_cache[unit_code]
+
+    cdef DurationType out = DurationType.__new__(DurationType)
+
+    out.init(cduration(unit_code))
+    _duration_type_cache[unit_code] = out
+
+    return out
+
+
 def date32():
     """
     Create instance of 32-bit date (days since UNIX epoch 1970-01-01)
@@ -1151,6 +1719,8 @@ cpdef DataType decimal128(int precision, int scale=0):
     decimal_type : Decimal128Type
     """
     cdef shared_ptr[CDataType] decimal_type
+    if precision < 1 or precision > 38:
+        raise ValueError("precision should be between 1 and 38")
     decimal_type.reset(new CDecimal128Type(precision, scale))
     return pyarrow_wrap_data_type(decimal_type)
 
@@ -1160,6 +1730,13 @@ def string():
     Create UTF8 variable-length string type
     """
     return primitive_type(_Type_STRING)
+
+
+def utf8():
+    """
+    Alias for string()
+    """
+    return string()
 
 
 def binary(int length=-1):
@@ -1181,6 +1758,33 @@ def binary(int length=-1):
     return pyarrow_wrap_data_type(fixed_size_binary_type)
 
 
+def large_binary():
+    """
+    Create large variable-length binary type
+
+    This data type may not be supported by all Arrow implementations.  Unless
+    you need to represent data larger than 2GB, you should prefer binary().
+    """
+    return primitive_type(_Type_LARGE_BINARY)
+
+
+def large_string():
+    """
+    Create large UTF8 variable-length string type
+
+    This data type may not be supported by all Arrow implementations.  Unless
+    you need to represent data larger than 2GB, you should prefer string().
+    """
+    return primitive_type(_Type_LARGE_STRING)
+
+
+def large_utf8():
+    """
+    Alias for large_string()
+    """
+    return large_string()
+
+
 cpdef ListType list_(value_type):
     """
     Create ListType instance from child data type or field
@@ -1195,41 +1799,81 @@ cpdef ListType list_(value_type):
     """
     cdef:
         DataType data_type
-        Field field
+        Field _field
         shared_ptr[CDataType] list_type
         ListType out = ListType.__new__(ListType)
 
     if isinstance(value_type, DataType):
-        list_type.reset(new CListType((<DataType> value_type).sp_type))
+        _field = field('item', value_type)
     elif isinstance(value_type, Field):
-        list_type.reset(new CListType((<Field> value_type).sp_field))
+        _field = value_type
     else:
-        raise ValueError('List requires DataType or Field')
+        raise TypeError('List requires DataType or Field')
 
+    list_type.reset(new CListType(_field.sp_field))
     out.init(list_type)
     return out
 
 
-cpdef DictionaryType dictionary(DataType index_type, Array dict_values,
-                                bint ordered=False):
+cpdef LargeListType large_list(value_type):
+    """
+    Create LargeListType instance from child data type or field
+
+    This data type may not be supported by all Arrow implementations.
+    Unless you need to represent data larger than 2**31 elements, you should
+    prefer list_().
+
+    Parameters
+    ----------
+    value_type : DataType or Field
+
+    Returns
+    -------
+    list_type : DataType
+    """
+    cdef:
+        DataType data_type
+        Field _field
+        shared_ptr[CDataType] list_type
+        LargeListType out = LargeListType.__new__(LargeListType)
+
+    if isinstance(value_type, DataType):
+        _field = field('item', value_type)
+    elif isinstance(value_type, Field):
+        _field = value_type
+    else:
+        raise TypeError('List requires DataType or Field')
+
+    list_type.reset(new CLargeListType(_field.sp_field))
+    out.init(list_type)
+    return out
+
+
+cpdef DictionaryType dictionary(index_type, value_type, bint ordered=False):
     """
     Dictionary (categorical, or simply encoded) type
 
     Parameters
     ----------
     index_type : DataType
-    dictionary : Array
+    value_type : DataType
     ordered : boolean
 
     Returns
     -------
     type : DictionaryType
     """
-    cdef DictionaryType out = DictionaryType.__new__(DictionaryType)
-    cdef shared_ptr[CDataType] dict_type
-    dict_type.reset(new CDictionaryType(index_type.sp_type,
-                                        dict_values.sp_array,
-                                        ordered == 1))
+    cdef:
+        DataType _index_type = ensure_type(index_type, allow_none=False)
+        DataType _value_type = ensure_type(value_type, allow_none=False)
+        DictionaryType out = DictionaryType.__new__(DictionaryType)
+        shared_ptr[CDataType] dict_type
+
+    if _index_type.id not in {Type_INT8, Type_INT16, Type_INT32, Type_INT64}:
+        raise TypeError("The dictionary index type should be signed integer.")
+
+    dict_type.reset(new CDictionaryType(_index_type.sp_type,
+                                        _value_type.sp_type, ordered == 1))
     out.init(dict_type)
     return out
 
@@ -1268,7 +1912,7 @@ def struct(fields):
         vector[shared_ptr[CField]] c_fields
         cdef shared_ptr[CDataType] struct_type
 
-    if isinstance(fields, collections.Mapping):
+    if isinstance(fields, compat.Mapping):
         fields = fields.items()
 
     for item in fields:
@@ -1331,6 +1975,7 @@ def union(children_fields, mode):
 cdef dict _type_aliases = {
     'null': null,
     'bool': bool_,
+    'boolean': bool_,
     'i1': int8,
     'int8': int8,
     'i2': int16,
@@ -1360,6 +2005,10 @@ cdef dict _type_aliases = {
     'str': string,
     'utf8': string,
     'binary': binary,
+    'large_string': large_string,
+    'large_str': large_string,
+    'large_utf8': large_string,
+    'large_binary': large_binary,
     'date32': date32,
     'date64': date64,
     'date32[day]': date32,
@@ -1372,6 +2021,10 @@ cdef dict _type_aliases = {
     'timestamp[ms]': timestamp('ms'),
     'timestamp[us]': timestamp('us'),
     'timestamp[ns]': timestamp('ns'),
+    'duration[s]': duration('s'),
+    'duration[ms]': duration('ms'),
+    'duration[us]': duration('us'),
+    'duration[ns]': duration('ns'),
 }
 
 
@@ -1394,7 +2047,18 @@ def type_for_alias(name):
     return alias()
 
 
-def schema(fields, dict metadata=None):
+cdef DataType ensure_type(object ty, c_bool allow_none=False):
+    if allow_none and ty is None:
+        return None
+    elif isinstance(ty, DataType):
+        return ty
+    elif isinstance(ty, six.string_types):
+        return type_for_alias(ty)
+    else:
+        raise TypeError('DataType expected, got {!r}'.format(type(ty)))
+
+
+def schema(fields, metadata=None):
     """
     Construct pyarrow.Schema from collection of fields
 
@@ -1426,7 +2090,7 @@ def schema(fields, dict metadata=None):
         Field py_field
         vector[shared_ptr[CField]] c_fields
 
-    if isinstance(fields, collections.Mapping):
+    if isinstance(fields, compat.Mapping):
         fields = fields.items()
 
     for item in fields:
@@ -1434,14 +2098,19 @@ def schema(fields, dict metadata=None):
             py_field = field(*item)
         else:
             py_field = item
+        if py_field is None:
+            raise TypeError("field or tuple expected, got None")
         c_fields.push_back(py_field.sp_field)
 
     if metadata is not None:
-        convert_metadata(metadata, &c_meta)
+        if not isinstance(metadata, dict):
+            raise TypeError('Metadata must be an instance of dict')
+        c_meta = pyarrow_unwrap_metadata(metadata)
 
     c_schema.reset(new CSchema(c_fields, c_meta))
     result = Schema.__new__(Schema)
     result.init_schema(c_schema)
+
     return result
 
 
@@ -1455,3 +2124,63 @@ def from_numpy_dtype(object dtype):
         check_status(NumPyDtypeToArrow(dtype, &c_type))
 
     return pyarrow_wrap_data_type(c_type)
+
+
+def is_boolean_value(object obj):
+    return IsPyBool(obj)
+
+
+def is_integer_value(object obj):
+    return IsPyInt(obj)
+
+
+def is_float_value(object obj):
+    return IsPyFloat(obj)
+
+
+cdef class _ExtensionRegistryNanny:
+    # Keep the registry alive until we have unregistered PyExtensionType
+    cdef:
+        shared_ptr[CExtensionTypeRegistry] registry
+
+    def __cinit__(self):
+        self.registry = CExtensionTypeRegistry.GetGlobalRegistry()
+
+    def release_registry(self):
+        self.registry.reset()
+
+
+_registry_nanny = _ExtensionRegistryNanny()
+
+
+def _register_py_extension_type():
+    cdef:
+        DataType storage_type
+        shared_ptr[CExtensionType] cpy_ext_type
+        c_string c_extension_name = tobytes("arrow.py_extension_type")
+
+    # Make a dummy C++ ExtensionType
+    storage_type = null()
+    check_status(CPyExtensionType.FromClass(
+        storage_type.sp_type, c_extension_name, PyExtensionType,
+        &cpy_ext_type))
+    check_status(
+        RegisterPyExtensionType(<shared_ptr[CDataType]> cpy_ext_type))
+
+
+def _unregister_py_extension_types():
+    # This needs to be done explicitly before the Python interpreter is
+    # finalized.  If the C++ type is destroyed later in the process
+    # teardown stage, it will invoke CPython APIs such as Py_DECREF
+    # with a destroyed interpreter.
+    unregister_extension_type("arrow.py_extension_type")
+    for ext_type in _python_extension_types_registry:
+        try:
+            unregister_extension_type(ext_type.extension_name)
+        except KeyError:
+            pass
+    _registry_nanny.release_registry()
+
+
+_register_py_extension_type()
+atexit.register(_unregister_py_extension_types)

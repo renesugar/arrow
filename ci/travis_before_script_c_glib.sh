@@ -21,13 +21,14 @@ set -ex
 
 source $TRAVIS_BUILD_DIR/ci/travis_env_common.sh
 
-source $TRAVIS_BUILD_DIR/ci/travis_install_conda.sh
-pip install meson
-
 if [ $TRAVIS_OS_NAME = "osx" ]; then
   export PKG_CONFIG_PATH=$PKG_CONFIG_PATH:/usr/local/opt/libffi/lib/pkgconfig
   export XML_CATALOG_FILES=/usr/local/etc/xml/catalog
 else
+  source $TRAVIS_BUILD_DIR/ci/travis_install_conda.sh
+  conda create -n meson -y -q python=3.6
+  conda activate meson
+  pip install meson
   sudo apt-get install -y -q \
     autoconf-archive \
     gtk-doc-tools \
@@ -35,30 +36,16 @@ else
   conda install -q -y ninja
 fi
 
-gem install test-unit gobject-introspection
-
 if [ $TRAVIS_OS_NAME = "osx" ]; then
   sudo env PKG_CONFIG_PATH=$PKG_CONFIG_PATH luarocks install lgi
 else
-  if [ $BUILD_TORCH_EXAMPLE = "yes" ]; then
-    git clone \
-      --quiet \
-      --depth 1 \
-      --recursive \
-      https://github.com/torch/distro.git ~/torch
-    pushd ~/torch
-    ./install-deps > /dev/null
-    echo "yes" | ./install.sh > /dev/null
-    . ~/torch/install/bin/torch-activate
-    popd
-    luarocks install lgi
-  else
-    sudo apt install -y -qq luarocks
-    sudo luarocks install lgi
-  fi
+  sudo apt install -y -qq luarocks
+  sudo luarocks install lgi
 fi
 
 pushd $ARROW_C_GLIB_DIR
+
+bundle install
 
 export PKG_CONFIG_PATH=$PKG_CONFIG_PATH:$ARROW_CPP_INSTALL/lib/pkgconfig
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$ARROW_CPP_INSTALL/lib

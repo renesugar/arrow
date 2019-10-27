@@ -1,14 +1,13 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p/>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p/>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -23,18 +22,21 @@ import static org.apache.arrow.vector.types.FloatingPointPrecision.SINGLE;
 import static org.apache.arrow.vector.types.UnionMode.Sparse;
 
 import org.apache.arrow.memory.BufferAllocator;
-import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.BigIntVector;
 import org.apache.arrow.vector.BitVector;
 import org.apache.arrow.vector.DateDayVector;
 import org.apache.arrow.vector.DateMilliVector;
 import org.apache.arrow.vector.DecimalVector;
+import org.apache.arrow.vector.DurationVector;
+import org.apache.arrow.vector.ExtensionTypeVector;
+import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.FixedSizeBinaryVector;
 import org.apache.arrow.vector.Float4Vector;
 import org.apache.arrow.vector.Float8Vector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.IntervalDayVector;
 import org.apache.arrow.vector.IntervalYearVector;
+import org.apache.arrow.vector.NullVector;
 import org.apache.arrow.vector.SmallIntVector;
 import org.apache.arrow.vector.TimeMicroVector;
 import org.apache.arrow.vector.TimeMilliVector;
@@ -53,12 +55,12 @@ import org.apache.arrow.vector.UInt1Vector;
 import org.apache.arrow.vector.UInt2Vector;
 import org.apache.arrow.vector.UInt4Vector;
 import org.apache.arrow.vector.UInt8Vector;
+import org.apache.arrow.vector.ValueVector;
 import org.apache.arrow.vector.VarBinaryVector;
 import org.apache.arrow.vector.VarCharVector;
-import org.apache.arrow.vector.ValueVector;
-import org.apache.arrow.vector.ZeroVector;
 import org.apache.arrow.vector.complex.FixedSizeListVector;
 import org.apache.arrow.vector.complex.ListVector;
+import org.apache.arrow.vector.complex.MapVector;
 import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.complex.UnionVector;
 import org.apache.arrow.vector.complex.impl.BigIntWriterImpl;
@@ -66,6 +68,7 @@ import org.apache.arrow.vector.complex.impl.BitWriterImpl;
 import org.apache.arrow.vector.complex.impl.DateDayWriterImpl;
 import org.apache.arrow.vector.complex.impl.DateMilliWriterImpl;
 import org.apache.arrow.vector.complex.impl.DecimalWriterImpl;
+import org.apache.arrow.vector.complex.impl.DurationWriterImpl;
 import org.apache.arrow.vector.complex.impl.FixedSizeBinaryWriterImpl;
 import org.apache.arrow.vector.complex.impl.Float4WriterImpl;
 import org.apache.arrow.vector.complex.impl.Float8WriterImpl;
@@ -102,28 +105,39 @@ import org.apache.arrow.vector.types.pojo.ArrowType.Binary;
 import org.apache.arrow.vector.types.pojo.ArrowType.Bool;
 import org.apache.arrow.vector.types.pojo.ArrowType.Date;
 import org.apache.arrow.vector.types.pojo.ArrowType.Decimal;
+import org.apache.arrow.vector.types.pojo.ArrowType.Duration;
+import org.apache.arrow.vector.types.pojo.ArrowType.ExtensionType;
 import org.apache.arrow.vector.types.pojo.ArrowType.FixedSizeBinary;
 import org.apache.arrow.vector.types.pojo.ArrowType.FixedSizeList;
 import org.apache.arrow.vector.types.pojo.ArrowType.FloatingPoint;
 import org.apache.arrow.vector.types.pojo.ArrowType.Int;
 import org.apache.arrow.vector.types.pojo.ArrowType.Interval;
 import org.apache.arrow.vector.types.pojo.ArrowType.List;
+import org.apache.arrow.vector.types.pojo.ArrowType.Map;
 import org.apache.arrow.vector.types.pojo.ArrowType.Null;
 import org.apache.arrow.vector.types.pojo.ArrowType.Struct;
 import org.apache.arrow.vector.types.pojo.ArrowType.Time;
 import org.apache.arrow.vector.types.pojo.ArrowType.Timestamp;
 import org.apache.arrow.vector.types.pojo.ArrowType.Union;
 import org.apache.arrow.vector.types.pojo.ArrowType.Utf8;
+import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.util.CallBack;
 
+/** An enumeration of all logical types supported by this library. */
 public class Types {
 
+  /**
+   * The actual enumeration of types.
+   */
   public enum MinorType {
     NULL(Null.INSTANCE) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return ZeroVector.INSTANCE;
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new NullVector();
       }
 
       @Override
@@ -133,8 +147,11 @@ public class Types {
     },
     STRUCT(Struct.INSTANCE) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new StructVector(name, allocator, fieldType, schemaChangeCallback);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new StructVector(field.getName(), allocator, field.getFieldType(), schemaChangeCallback);
       }
 
       @Override
@@ -144,8 +161,11 @@ public class Types {
     },
     TINYINT(new Int(8, true)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new TinyIntVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new TinyIntVector(field, allocator);
       }
 
       @Override
@@ -155,8 +175,11 @@ public class Types {
     },
     SMALLINT(new Int(16, true)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new SmallIntVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new SmallIntVector(field, allocator);
       }
 
       @Override
@@ -166,8 +189,11 @@ public class Types {
     },
     INT(new Int(32, true)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new IntVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new IntVector(field, allocator);
       }
 
       @Override
@@ -177,8 +203,11 @@ public class Types {
     },
     BIGINT(new Int(64, true)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new BigIntVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new BigIntVector(field, allocator);
       }
 
       @Override
@@ -188,8 +217,11 @@ public class Types {
     },
     DATEDAY(new Date(DateUnit.DAY)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new DateDayVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new DateDayVector(field, allocator);
       }
 
       @Override
@@ -199,8 +231,11 @@ public class Types {
     },
     DATEMILLI(new Date(DateUnit.MILLISECOND)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new DateMilliVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new DateMilliVector(field, allocator);
       }
 
       @Override
@@ -210,8 +245,11 @@ public class Types {
     },
     TIMESEC(new Time(TimeUnit.SECOND, 32)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new TimeSecVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new TimeSecVector(field, allocator);
       }
 
       @Override
@@ -221,8 +259,11 @@ public class Types {
     },
     TIMEMILLI(new Time(TimeUnit.MILLISECOND, 32)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new TimeMilliVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new TimeMilliVector(field, allocator);
       }
 
       @Override
@@ -232,8 +273,11 @@ public class Types {
     },
     TIMEMICRO(new Time(TimeUnit.MICROSECOND, 64)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new TimeMicroVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new TimeMicroVector(field, allocator);
       }
 
       @Override
@@ -243,8 +287,11 @@ public class Types {
     },
     TIMENANO(new Time(TimeUnit.NANOSECOND, 64)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new TimeNanoVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new TimeNanoVector(field, allocator);
       }
 
       @Override
@@ -255,8 +302,11 @@ public class Types {
     // time in second from the Unix epoch, 00:00:00.000000 on 1 January 1970, UTC.
     TIMESTAMPSEC(new Timestamp(org.apache.arrow.vector.types.TimeUnit.SECOND, null)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new TimeStampSecVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new TimeStampSecVector(field, allocator);
       }
 
       @Override
@@ -267,8 +317,11 @@ public class Types {
     // time in millis from the Unix epoch, 00:00:00.000 on 1 January 1970, UTC.
     TIMESTAMPMILLI(new Timestamp(org.apache.arrow.vector.types.TimeUnit.MILLISECOND, null)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new TimeStampMilliVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new TimeStampMilliVector(field, allocator);
       }
 
       @Override
@@ -279,8 +332,11 @@ public class Types {
     // time in microsecond from the Unix epoch, 00:00:00.000000 on 1 January 1970, UTC.
     TIMESTAMPMICRO(new Timestamp(org.apache.arrow.vector.types.TimeUnit.MICROSECOND, null)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new TimeStampMicroVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new TimeStampMicroVector(field, allocator);
       }
 
       @Override
@@ -291,8 +347,11 @@ public class Types {
     // time in nanosecond from the Unix epoch, 00:00:00.000000000 on 1 January 1970, UTC.
     TIMESTAMPNANO(new Timestamp(org.apache.arrow.vector.types.TimeUnit.NANOSECOND, null)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new TimeStampNanoVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new TimeStampNanoVector(field, allocator);
       }
 
       @Override
@@ -302,8 +361,11 @@ public class Types {
     },
     INTERVALDAY(new Interval(IntervalUnit.DAY_TIME)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new IntervalDayVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new IntervalDayVector(field, allocator);
       }
 
       @Override
@@ -311,10 +373,29 @@ public class Types {
         return new IntervalDayWriterImpl((IntervalDayVector) vector);
       }
     },
+    DURATION(null) {
+      @Override
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new DurationVector(field, allocator);
+      }
+
+      @Override
+      public FieldWriter getNewFieldWriter(ValueVector vector) {
+        return new DurationWriterImpl((DurationVector) vector);
+      }
+    },
+
+
     INTERVALYEAR(new Interval(IntervalUnit.YEAR_MONTH)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new IntervalYearVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new IntervalYearVector(field, allocator);
       }
 
       @Override
@@ -325,8 +406,11 @@ public class Types {
     //  4 byte ieee 754
     FLOAT4(new FloatingPoint(SINGLE)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new Float4Vector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new Float4Vector(field, allocator);
       }
 
       @Override
@@ -337,8 +421,11 @@ public class Types {
     //  8 byte ieee 754
     FLOAT8(new FloatingPoint(DOUBLE)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new Float8Vector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new Float8Vector(field, allocator);
       }
 
       @Override
@@ -348,8 +435,11 @@ public class Types {
     },
     BIT(Bool.INSTANCE) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new BitVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new BitVector(field, allocator);
       }
 
       @Override
@@ -359,8 +449,11 @@ public class Types {
     },
     VARCHAR(Utf8.INSTANCE) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new VarCharVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new VarCharVector(field, allocator);
       }
 
       @Override
@@ -370,8 +463,11 @@ public class Types {
     },
     VARBINARY(Binary.INSTANCE) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new VarBinaryVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new VarBinaryVector(field, allocator);
       }
 
       @Override
@@ -381,8 +477,11 @@ public class Types {
     },
     DECIMAL(null) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new DecimalVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new DecimalVector(field, allocator);
       }
 
       @Override
@@ -392,8 +491,11 @@ public class Types {
     },
     FIXEDSIZEBINARY(null) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new FixedSizeBinaryVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new FixedSizeBinaryVector(field, allocator);
       }
 
       @Override
@@ -403,8 +505,11 @@ public class Types {
     },
     UINT1(new Int(8, false)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new UInt1Vector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new UInt1Vector(field, allocator);
       }
 
       @Override
@@ -414,8 +519,11 @@ public class Types {
     },
     UINT2(new Int(16, false)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new UInt2Vector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new UInt2Vector(field, allocator);
       }
 
       @Override
@@ -425,8 +533,11 @@ public class Types {
     },
     UINT4(new Int(32, false)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new UInt4Vector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new UInt4Vector(field, allocator);
       }
 
       @Override
@@ -436,8 +547,11 @@ public class Types {
     },
     UINT8(new Int(64, false)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new UInt8Vector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new UInt8Vector(field, allocator);
       }
 
       @Override
@@ -447,8 +561,11 @@ public class Types {
     },
     LIST(List.INSTANCE) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new ListVector(name, allocator, fieldType, schemaChangeCallback);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new ListVector(field.getName(), allocator, field.getFieldType(), schemaChangeCallback);
       }
 
       @Override
@@ -458,22 +575,30 @@ public class Types {
     },
     FIXED_SIZE_LIST(null) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new FixedSizeListVector(name, allocator, fieldType, schemaChangeCallback);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new FixedSizeListVector(field.getName(), allocator, field.getFieldType(), schemaChangeCallback);
       }
 
       @Override
       public FieldWriter getNewFieldWriter(ValueVector vector) {
-        throw new UnsupportedOperationException("FieldWriter not implemented for FixedSizeList type");
+        throw new UnsupportedOperationException("FieldWriter not implemented for FixedSizeList " +
+          "type");
       }
     },
     UNION(new Union(Sparse, null)) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        if (fieldType.getDictionary() != null) {
-          throw new UnsupportedOperationException("Dictionary encoding not supported for complex types");
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        if (field.getFieldType().getDictionary() != null) {
+          throw new UnsupportedOperationException("Dictionary encoding not supported for complex " +
+              "types");
         }
-        return new UnionVector(name, allocator, schemaChangeCallback);
+        return new UnionVector(field.getName(), allocator, field.getFieldType(), schemaChangeCallback);
       }
 
       @Override
@@ -481,10 +606,27 @@ public class Types {
         return new UnionWriter((UnionVector) vector);
       }
     },
+    MAP(null) {
+      @Override
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new MapVector(field.getName(), allocator, field.getFieldType(), schemaChangeCallback);
+      }
+
+      @Override
+      public FieldWriter getNewFieldWriter(ValueVector vector) {
+        return new UnionListWriter((MapVector) vector);
+      }
+    },
     TIMESTAMPSECTZ(null) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new TimeStampSecTZVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new TimeStampSecTZVector(field, allocator);
       }
 
       @Override
@@ -494,8 +636,11 @@ public class Types {
     },
     TIMESTAMPMILLITZ(null) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new TimeStampMilliTZVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new TimeStampMilliTZVector(field, allocator);
       }
 
       @Override
@@ -505,8 +650,11 @@ public class Types {
     },
     TIMESTAMPMICROTZ(null) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new TimeStampMicroTZVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new TimeStampMicroTZVector(field, allocator);
       }
 
       @Override
@@ -516,15 +664,34 @@ public class Types {
     },
     TIMESTAMPNANOTZ(null) {
       @Override
-      public FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback) {
-        return new TimeStampNanoTZVector(name, fieldType, allocator);
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return new TimeStampNanoTZVector(field, allocator);
       }
 
       @Override
       public FieldWriter getNewFieldWriter(ValueVector vector) {
         return new TimeStampNanoTZWriterImpl((TimeStampNanoTZVector) vector);
       }
-    };
+    },
+    EXTENSIONTYPE(null) {
+      @Override
+      public FieldVector getNewVector(
+          Field field,
+          BufferAllocator allocator,
+          CallBack schemaChangeCallback) {
+        return ((ExtensionType) field.getFieldType().getType()).getNewVector(field.getName(),
+            field.getFieldType(), allocator);
+      }
+
+      @Override
+      public FieldWriter getNewFieldWriter(ValueVector vector) {
+        return ((ExtensionTypeVector) vector).getUnderlyingVector().getMinorType().getNewFieldWriter(vector);
+      }
+    },
+    ;
 
     private final ArrowType type;
 
@@ -532,6 +699,9 @@ public class Types {
       this.type = type;
     }
 
+    /**
+     * Returns the {@link ArrowType} equivalent of this type.
+     */
     public final ArrowType getType() {
       if (type == null) {
         throw new UnsupportedOperationException("Cannot get simple type for type " + name());
@@ -539,11 +709,27 @@ public class Types {
       return type;
     }
 
-    public abstract FieldVector getNewVector(String name, FieldType fieldType, BufferAllocator allocator, CallBack schemaChangeCallback);
+    /** Constructs a new vector for the given type. */
+    public final FieldVector getNewVector(
+        String name,
+        FieldType fieldType,
+        BufferAllocator allocator,
+        CallBack schemaChangeCallback) {
+      return getNewVector(new Field(name, fieldType, null), allocator, schemaChangeCallback);
+    }
+
+    /** Constructs a new vector for the given type. */
+    public abstract FieldVector getNewVector(
+        Field field,
+        BufferAllocator allocator,
+        CallBack schemaChangeCallback);
 
     public abstract FieldWriter getNewFieldWriter(ValueVector vector);
   }
 
+  /**
+   * Maps the ArrowType to the java implementations MinorType.
+   */
   public static MinorType getMinorTypeForArrowType(ArrowType arrowType) {
     return arrowType.accept(new ArrowTypeVisitor<MinorType>() {
       @Override
@@ -569,6 +755,11 @@ public class Types {
       @Override
       public MinorType visit(Union type) {
         return MinorType.UNION;
+      }
+
+      @Override
+      public MinorType visit(Map type) {
+        return MinorType.MAP;
       }
 
       @Override
@@ -681,6 +872,16 @@ public class Types {
           default:
             throw new IllegalArgumentException("unknown unit: " + type);
         }
+      }
+
+      @Override
+      public MinorType visit(Duration type) {
+        return MinorType.DURATION;
+      }
+
+      @Override
+      public MinorType visit(ExtensionType type) {
+        return MinorType.EXTENSIONTYPE;
       }
     });
   }

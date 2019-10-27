@@ -22,7 +22,9 @@ set -e
 # overrides multibuild's default build_wheel
 function build_wheel {
     pip install -U pip
-    pip install setuptools_scm
+
+    # ARROW-5670: Python 3.5 can fail with HTTPS error in CMake build
+    pip install setuptools_scm requests
 
     # Include brew installed versions of flex and bison.
     # We need them to build Thrift. The ones that come with Xcode are too old.
@@ -35,10 +37,10 @@ function build_wheel {
 
     pushd $1
 
-    boost_version="1.65.1"
+    boost_version="1.66.0"
     boost_directory_name="boost_${boost_version//\./_}"
     boost_tarball_name="${boost_directory_name}.tar.gz"
-    wget --no-check-certificate \
+    wget -nv --no-check-certificate \
         http://downloads.sourceforge.net/project/boost/boost/"${boost_version}"/"${boost_tarball_name}" \
         -O "${boost_tarball_name}"
     tar xf "${boost_tarball_name}"
@@ -60,7 +62,7 @@ function build_wheel {
     ./b2 tools/bcp > /dev/null 2>&1
     ./dist/bin/bcp --namespace=arrow_boost --namespace-alias \
         filesystem date_time system regex build algorithm locale format \
-        "$arrow_boost" > /dev/null 2>&1
+        multiprecision/cpp_int "$arrow_boost" > /dev/null 2>&1
     popd
 
     # Now build our custom namespaced Boost version.
@@ -93,49 +95,33 @@ function build_wheel {
       install_name_tool -change libarrow_boost_system.dylib @rpath/libarrow_boost_system.dylib libarrow_boost_filesystem.dylib
     popd
 
-    # We build a custom version of thrift instead of using the one that comes
-    # with brew as we also want it to use our namespaced version of Boost.
-    # TODO(PARQUET-1262): Use the external project facilities of parquet-cpp.
-    export THRIFT_HOME=`pwd`/thift-dist
-    export THRIFT_VERSION=0.11.0
-    wget http://archive.apache.org/dist/thrift/${THRIFT_VERSION}/thrift-${THRIFT_VERSION}.tar.gz
-    tar xf thrift-${THRIFT_VERSION}.tar.gz
-    pushd thrift-${THRIFT_VERSION}
-    mkdir build-tmp
-    pushd build-tmp
-    cmake -DCMAKE_BUILD_TYPE=release \
-        "-DCMAKE_CXX_FLAGS=-fPIC" \
-        "-DCMAKE_C_FLAGS=-fPIC" \
-        "-DCMAKE_INSTALL_PREFIX=${THRIFT_HOME}" \
-        "-DCMAKE_INSTALL_RPATH=${THRIFT_HOME}/lib" \
-        "-DBUILD_SHARED_LIBS=OFF" \
-        "-DBUILD_TESTING=OFF" \
-        "-DWITH_QT4=OFF" \
-        "-DWITH_C_GLIB=OFF" \
-        "-DWITH_JAVA=OFF" \
-        "-DWITH_PYTHON=OFF" \
-        "-DWITH_CPP=ON" \
-        "-DWITH_STATIC_LIB=ON" \
-        "-DWITH_LIBEVENT=OFF" \
-        -DBoost_NAMESPACE=arrow_boost \
-        -DBOOST_ROOT="$arrow_boost_dist" \
-        ..
-    make install -j5
-    popd
-    popd
-
     # Now we can start with the actual build of Arrow and Parquet.
     # We pin NumPy to an old version here as the NumPy version one builds
     # with is the oldest supported one. Thanks to NumPy's guarantees our Arrow
     # build will also work with newer NumPy versions.
     export ARROW_HOME=`pwd`/arrow-dist
     export PARQUET_HOME=`pwd`/arrow-dist
-    pip install "cython==0.27.3" "numpy==${NP_TEST_DEP}"
+
+    pip install $(pip_opts) -r python/requirements-wheel.txt cython
+
+    if [ ${MB_PYTHON_VERSION} != "2.7" ]; then
+      # Gandiva is not supported on Python 2.7
+      export PYARROW_WITH_GANDIVA=1
+      export BUILD_ARROW_GANDIVA=ON
+    else
+      export PYARROW_WITH_GANDIVA=0
+      export BUILD_ARROW_GANDIVA=OFF
+    fi
+
+    git submodule update --init
+    export ARROW_TEST_DATA=`pwd`/testing/data
+
     pushd cpp
     mkdir build
     pushd build
     cmake -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_INSTALL_PREFIX=$ARROW_HOME \
+          -DARROW_VERBOSE_THIRDPARTY_BUILD=ON \
           -DARROW_BUILD_TESTS=OFF \
           -DARROW_BUILD_SHARED=ON \
           -DARROW_BOOST_USE_SHARED=ON \
@@ -143,29 +129,27 @@ function build_wheel {
           -DARROW_PLASMA=ON \
           -DARROW_RPATH_ORIGIN=ON \
           -DARROW_PYTHON=ON \
-          -DARROW_ORC=ON \
+          -DARROW_WITH_BZ2=ON \
+          -DARROW_WITH_ZLIB=ON \
+          -DARROW_WITH_ZSTD=ON \
+          -DARROW_WITH_LZ4=ON \
+          -DARROW_WITH_SNAPPY=ON \
+          -DARROW_WITH_BROTLI=ON \
+          -DARROW_PARQUET=ON \
+          -DARROW_GANDIVA=${BUILD_ARROW_GANDIVA} \
+          -DARROW_ORC=OFF \
           -DBOOST_ROOT="$arrow_boost_dist" \
           -DBoost_NAMESPACE=arrow_boost \
+          -DARROW_FLIGHT=ON \
+          -DgRPC_SOURCE=SYSTEM \
+          -Dc-ares_SOURCE=BUNDLED \
+          -Dzlib_SOURCE=BUNDLED \
+          -DARROW_PROTOBUF_USE_SHARED=OFF \
+          -DOPENSSL_USE_STATIC_LIBS=ON  \
+          -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@1.1) \
           -DMAKE=make \
           ..
     make -j5
-    make install
-    popd
-    popd
-
-    git clone https://github.com/apache/parquet-cpp.git
-    pushd parquet-cpp
-    mkdir build
-    pushd build
-    cmake -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_INSTALL_PREFIX=$PARQUET_HOME \
-          -DPARQUET_VERBOSE_THIRDPARTY_BUILD=ON \
-          -DPARQUET_BUILD_TESTS=OFF \
-          -DPARQUET_BOOST_USE_SHARED=ON \
-          -DBoost_NAMESPACE=arrow_boost \
-          -DBOOST_ROOT="$arrow_boost_dist" \
-          ..
-    make -j5 VERBOSE=1
     make install
     popd
     popd
@@ -177,54 +161,61 @@ function build_wheel {
     unset ARROW_HOME
     unset PARQUET_HOME
 
+    export PYARROW_WITH_FLIGHT=1
+    export PYARROW_WITH_PLASMA=1
     export PYARROW_WITH_PARQUET=1
-    export PYARROW_WITH_ORC=1
+    export PYARROW_WITH_ORC=0
     export PYARROW_WITH_JEMALLOC=1
     export PYARROW_WITH_PLASMA=1
     export PYARROW_BUNDLE_BOOST=1
     export PYARROW_BUNDLE_ARROW_CPP=1
     export PYARROW_BUILD_TYPE='release'
+    export PYARROW_BOOST_NAMESPACE='arrow_boost'
     export PYARROW_CMAKE_OPTIONS="-DBOOST_ROOT=$arrow_boost_dist"
     export SETUPTOOLS_SCM_PRETEND_VERSION=$PYARROW_VERSION
     pushd python
-    python setup.py build_ext \
-           --with-plasma --with-orc --with-parquet \
-           --bundle-arrow-cpp --bundle-boost --boost-namespace=arrow_boost \
-           bdist_wheel
+    python setup.py build_ext bdist_wheel
     ls -l dist/
     popd
 
     popd
 }
 
-# overrides multibuild's default install_run
-function install_run {
+function install_wheel {
     multibuild_dir=`realpath $MULTIBUILD_DIR`
 
     pushd $1  # enter arrow's directory
-
     wheelhouse="$PWD/python/dist"
 
-    # Install test dependencies and built wheel
-    if [ -n "$TEST_DEPENDS" ]; then
-        pip install $(pip_opts) $TEST_DEPENDS
-    fi
     # Install compatible wheel
     pip install $(pip_opts) \
         $(python $multibuild_dir/supported_wheels.py $wheelhouse/*.whl)
 
-    # Runs tests on installed distribution from an empty directory
-    python --version
+    popd
+}
 
-    # Test optional dependencies
-    python -c "import pyarrow"
-    python -c "import pyarrow.orc"
-    python -c "import pyarrow.parquet"
-    python -c "import pyarrow.plasma"
+function run_unit_tests {
+    pushd $1
+
+    # Install test dependencies
+    pip install $(pip_opts) -r python/requirements-test.txt
 
     # Run pyarrow tests
-    pip install pytest pytest-faulthandler
-    py.test --pyargs pyarrow
+    pytest -rs --pyargs pyarrow
 
     popd
+}
+
+function run_import_tests {
+    # Test optional dependencies
+    python -c "
+import sys
+import pyarrow
+import pyarrow.parquet
+import pyarrow.plasma
+
+if sys.version_info.major > 2:
+    import pyarrow.flight
+    import pyarrow.gandiva
+"
 }

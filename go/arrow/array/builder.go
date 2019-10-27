@@ -21,7 +21,7 @@ import (
 	"sync/atomic"
 
 	"github.com/apache/arrow/go/arrow"
-	"github.com/apache/arrow/go/arrow/internal/bitutil"
+	"github.com/apache/arrow/go/arrow/bitutil"
 	"github.com/apache/arrow/go/arrow/memory"
 )
 
@@ -31,6 +31,10 @@ const (
 
 // Builder provides an interface to build arrow arrays.
 type Builder interface {
+	// Retain increases the reference count by 1.
+	// Retain may be called simultaneously from multiple goroutines.
+	Retain()
+
 	// Release decreases the reference count by 1.
 	Release()
 
@@ -46,6 +50,14 @@ type Builder interface {
 
 	// AppendNull adds a new null value to the array being built.
 	AppendNull()
+
+	// Reserve ensures there is enough space for appending n elements
+	// by checking the capacity and calling Resize if necessary.
+	Reserve(n int)
+
+	// Resize adjusts the space allocated by b to n elements. If n is greater than b.Cap(),
+	// additional memory will be allocated. If n is smaller, the allocated memory may reduced.
+	Resize(n int)
 
 	// NewArray creates a new array from the memory buffers used
 	// by the builder and resets the Builder so it can be used to build
@@ -113,6 +125,10 @@ func (b *builder) resize(newBits int, init func(int)) {
 	if oldBytesN < newBytesN {
 		// TODO(sgc): necessary?
 		memory.Set(b.nullBitmap.Buf()[oldBytesN:], 0)
+	}
+	if newBits < b.length {
+		b.length = newBits
+		b.nulls = newBits - bitutil.CountSetBits(b.nullBitmap.Buf(), 0, newBits)
 	}
 }
 
@@ -214,19 +230,28 @@ func newBuilder(mem memory.Allocator, dtype arrow.DataType) Builder {
 		return NewUint64Builder(mem)
 	case arrow.INT64:
 		return NewInt64Builder(mem)
-	case arrow.HALF_FLOAT:
+	case arrow.FLOAT16:
+		return NewFloat16Builder(mem)
 	case arrow.FLOAT32:
 		return NewFloat32Builder(mem)
 	case arrow.FLOAT64:
 		return NewFloat64Builder(mem)
 	case arrow.STRING:
+		return NewStringBuilder(mem)
 	case arrow.BINARY:
+		return NewBinaryBuilder(mem, arrow.BinaryTypes.Binary)
 	case arrow.FIXED_SIZE_BINARY:
+		typ := dtype.(*arrow.FixedSizeBinaryType)
+		return NewFixedSizeBinaryBuilder(mem, typ)
 	case arrow.DATE32:
 	case arrow.DATE64:
 	case arrow.TIMESTAMP:
 	case arrow.TIME32:
+		typ := dtype.(*arrow.Time32Type)
+		return NewTime32Builder(mem, typ)
 	case arrow.TIME64:
+		typ := dtype.(*arrow.Time64Type)
+		return NewTime64Builder(mem, typ)
 	case arrow.INTERVAL:
 	case arrow.DECIMAL:
 	case arrow.LIST:
@@ -238,6 +263,11 @@ func newBuilder(mem memory.Allocator, dtype arrow.DataType) Builder {
 	case arrow.UNION:
 	case arrow.DICTIONARY:
 	case arrow.MAP:
+	case arrow.EXTENSION:
+	case arrow.FIXED_SIZE_LIST:
+		typ := dtype.(*arrow.FixedSizeListType)
+		return NewFixedSizeListBuilder(mem, typ.Len(), typ.Elem())
+	case arrow.DURATION:
 	}
 	panic(fmt.Errorf("arrow/array: unsupported builder for %T", dtype))
 }

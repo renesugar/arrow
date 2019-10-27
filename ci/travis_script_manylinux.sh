@@ -17,28 +17,67 @@
 # specific language governing permissions and limitations
 # under the License.
 
+# NB(wesm): Here is the Travis CI entry removed in ARROW-5962
+
+# - name: "[manylinux1] Python"
+#   language: cpp
+#   env:
+#   - PYTHON_VERSIONS="3.6,16 3.7,16"
+#   before_script:
+#   - if [ $ARROW_CI_PYTHON_AFFECTED == "1" ]; then docker-compose pull python-manylinux1; fi
+#   script:
+#   - if [ $ARROW_CI_PYTHON_AFFECTED == "1" ]; then $TRAVIS_BUILD_DIR/ci/travis_script_manylinux.sh; fi
 
 set -ex
-
-pushd python/manylinux1
-git clone ../../ arrow
-docker build -t arrow-base-x86_64 -f Dockerfile-x86_64 .
-docker run --shm-size=2g --rm -e PYARROW_PARALLEL=3 -v $PWD:/io arrow-base-x86_64 /io/build_arrow.sh
 
 # Testing for https://issues.apache.org/jira/browse/ARROW-2657
 # These tests cannot be run inside of the docker container, since TensorFlow
 # does not run on manylinux1
 
 source $TRAVIS_BUILD_DIR/ci/travis_env_common.sh
-
 source $TRAVIS_BUILD_DIR/ci/travis_install_conda.sh
 
-PYTHON_VERSION=3.6
-CONDA_ENV_DIR=$TRAVIS_BUILD_DIR/pyarrow-test-$PYTHON_VERSION
+pushd python/manylinux1
 
-conda create -y -q -p $CONDA_ENV_DIR python=$PYTHON_VERSION
-source activate $CONDA_ENV_DIR
+cat << EOF > check_imports.py
+import sys
+import pyarrow
+import pyarrow.orc
+import pyarrow.parquet
+import pyarrow.plasma
 
-pip install -q tensorflow
-pip install "dist/`ls dist/ | grep cp36`"
-python -c "import pyarrow; import tensorflow"
+if sys.version_info.major > 2:
+    import pyarrow.flight
+    import pyarrow.gandiva
+EOF
+
+for PYTHON_TUPLE in ${PYTHON_VERSIONS}; do
+  IFS="," read PYTHON_VERSION UNICODE_WIDTH <<< $PYTHON_TUPLE
+
+  # cleanup the artifact directory, docker writes it as root
+  sudo rm -rf dist
+
+  # build the wheels
+  docker-compose run \
+    -e PYARROW_PARALLEL=3 \
+    -e PYTHON_VERSION=$PYTHON_VERSION \
+    -e UNICODE_WIDTH=$UNICODE_WIDTH \
+    python-manylinux1
+
+  # create a testing conda environment
+  CONDA_ENV_DIR=$TRAVIS_BUILD_DIR/pyarrow-test-$PYTHON_VERSION
+  conda create -y -q -p $CONDA_ENV_DIR python=$PYTHON_VERSION
+  conda activate $CONDA_ENV_DIR
+
+  # install the produced wheels
+  pip install dist/*.whl
+
+  # Test optional dependencies
+  python check_imports.py
+
+  # Install test dependencies and run pyarrow tests
+  pip install -r ../requirements-test.txt
+  pytest --pyargs pyarrow
+done
+
+popd

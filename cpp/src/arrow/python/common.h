@@ -19,23 +19,32 @@
 #define ARROW_PYTHON_COMMON_H
 
 #include <memory>
-#include <sstream>
-#include <string>
 #include <utility>
 
 #include "arrow/python/config.h"
 
 #include "arrow/buffer.h"
+#include "arrow/python/pyarrow.h"
+#include "arrow/python/visibility.h"
 #include "arrow/util/macros.h"
-#include "arrow/util/visibility.h"
 
 namespace arrow {
 
 class MemoryPool;
+template <class T>
+class Result;
 
 namespace py {
 
-ARROW_EXPORT Status ConvertPyError(StatusCode code = StatusCode::UnknownError);
+// Convert current Python error to a Status.  The Python error state is cleared
+// and can be restored with RestorePyError().
+ARROW_PYTHON_EXPORT Status ConvertPyError(StatusCode code = StatusCode::UnknownError);
+// Same as ConvertPyError(), but returns Status::OK() if no Python error is set.
+ARROW_PYTHON_EXPORT Status PassPyError();
+// Query whether the given Status is a Python error (as wrapped by ConvertPyError()).
+ARROW_PYTHON_EXPORT bool IsPyError(const Status& status);
+// Restore a Python error wrapped in a Status.
+ARROW_PYTHON_EXPORT void RestorePyError(const Status& status);
 
 // Catch a pending Python exception and return the corresponding Status.
 // If no exception is pending, Status::OK() is returned.
@@ -47,14 +56,27 @@ inline Status CheckPyError(StatusCode code = StatusCode::UnknownError) {
   }
 }
 
-ARROW_EXPORT Status PassPyError();
+#define RETURN_IF_PYERROR() ARROW_RETURN_NOT_OK(CheckPyError());
 
-// TODO(wesm): We can just let errors pass through. To be explored later
-#define RETURN_IF_PYERROR() RETURN_NOT_OK(CheckPyError());
+#define PY_RETURN_IF_ERROR(CODE) ARROW_RETURN_NOT_OK(CheckPyError(CODE));
 
-#define PY_RETURN_IF_ERROR(CODE) RETURN_NOT_OK(CheckPyError(CODE));
+// For Cython, as you can't define template C++ functions in Cython, only use them.
+// This function can set a Python exception.  It assumes that T has a (cheap)
+// default constructor.
+template <class T>
+T GetResultValue(Result<T>& result) {
+  if (ARROW_PREDICT_TRUE(result.ok())) {
+    return *std::move(result);
+  } else {
+    int r = internal::check_status(result.status());
+    assert(r == -1);  // should have errored out
+    ARROW_UNUSED(r);
+    return {};
+  }
+}
 
-class ARROW_EXPORT PyAcquireGIL {
+// A RAII-style helper that ensures the GIL is acquired inside a lexical block.
+class ARROW_PYTHON_EXPORT PyAcquireGIL {
  public:
   PyAcquireGIL() : acquired_gil_(false) { acquire(); }
 
@@ -81,11 +103,41 @@ class ARROW_EXPORT PyAcquireGIL {
   ARROW_DISALLOW_COPY_AND_ASSIGN(PyAcquireGIL);
 };
 
+// A RAII-style helper that releases the GIL until the end of a lexical block
+class ARROW_PYTHON_EXPORT PyReleaseGIL {
+ public:
+  PyReleaseGIL() { saved_state_ = PyEval_SaveThread(); }
+
+  ~PyReleaseGIL() { PyEval_RestoreThread(saved_state_); }
+
+ private:
+  PyThreadState* saved_state_;
+  ARROW_DISALLOW_COPY_AND_ASSIGN(PyReleaseGIL);
+};
+
+// A helper to call safely into the Python interpreter from arbitrary C++ code.
+// The GIL is acquired, and the current thread's error status is preserved.
+template <typename Function>
+Status SafeCallIntoPython(Function&& func) {
+  PyAcquireGIL lock;
+  PyObject* exc_type;
+  PyObject* exc_value;
+  PyObject* exc_traceback;
+  PyErr_Fetch(&exc_type, &exc_value, &exc_traceback);
+  Status st = std::forward<Function>(func)();
+  // If the return Status is a "Python error", the current Python error status
+  // describes the error and shouldn't be clobbered.
+  if (!IsPyError(st) && exc_type != NULLPTR) {
+    PyErr_Restore(exc_type, exc_value, exc_traceback);
+  }
+  return st;
+}
+
 #define PYARROW_IS_PY2 PY_MAJOR_VERSION <= 2
 
 // A RAII primitive that DECREFs the underlying PyObject* when it
 // goes out of scope.
-class ARROW_EXPORT OwnedRef {
+class ARROW_PYTHON_EXPORT OwnedRef {
  public:
   OwnedRef() : obj_(NULLPTR) {}
   OwnedRef(OwnedRef&& other) : OwnedRef(other.detach()) {}
@@ -126,7 +178,7 @@ class ARROW_EXPORT OwnedRef {
 // Same as OwnedRef, but ensures the GIL is taken when it goes out of scope.
 // This is for situations where the GIL is not always known to be held
 // (e.g. if it is released in the middle of a function for performance reasons)
-class ARROW_EXPORT OwnedRefNoGIL : public OwnedRef {
+class ARROW_PYTHON_EXPORT OwnedRefNoGIL : public OwnedRef {
  public:
   OwnedRefNoGIL() : OwnedRef() {}
   OwnedRefNoGIL(OwnedRefNoGIL&& other) : OwnedRef(other.detach()) {}
@@ -186,7 +238,7 @@ struct PyBytesView {
       *is_utf8 = true;
       return FromUnicode(obj);
     } else {
-      RETURN_NOT_OK(FromBinary(obj, "a string or bytes object"));
+      ARROW_RETURN_NOT_OK(FromBinary(obj, "a string or bytes object"));
       if (check_utf8) {
         // Check the bytes are utf8 utf-8
         OwnedRef decoded(PyUnicode_FromStringAndSize(bytes, size));
@@ -215,10 +267,8 @@ struct PyBytesView {
       this->ref.reset();
       return Status::OK();
     } else {
-      std::stringstream ss;
-      ss << "Expected " << expected_msg << ", got a '" << Py_TYPE(obj)->tp_name
-         << "' object";
-      return Status::TypeError(ss.str());
+      return Status::TypeError("Expected ", expected_msg, ", got a '",
+                               Py_TYPE(obj)->tp_name, "' object");
     }
   }
 
@@ -226,10 +276,10 @@ struct PyBytesView {
 };
 
 // Return the common PyArrow memory pool
-ARROW_EXPORT void set_default_memory_pool(MemoryPool* pool);
-ARROW_EXPORT MemoryPool* get_memory_pool();
+ARROW_PYTHON_EXPORT void set_default_memory_pool(MemoryPool* pool);
+ARROW_PYTHON_EXPORT MemoryPool* get_memory_pool();
 
-class ARROW_EXPORT PyBuffer : public Buffer {
+class ARROW_PYTHON_EXPORT PyBuffer : public Buffer {
  public:
   /// While memoryview objects support multi-dimensional buffers, PyBuffer only supports
   /// one-dimensional byte buffers.
@@ -243,6 +293,17 @@ class ARROW_EXPORT PyBuffer : public Buffer {
 
   Py_buffer py_buf_;
 };
+
+// This is annoying: because C++11 does not allow implicit conversion of string
+// literals to non-const char*, we need to go through some gymnastics to use
+// PyObject_CallMethod without a lot of pain (its arguments are non-const
+// char*)
+template <typename... ArgTypes>
+static inline PyObject* cpp_PyObject_CallMethod(PyObject* obj, const char* method_name,
+                                                const char* argspec, ArgTypes... args) {
+  return PyObject_CallMethod(obj, const_cast<char*>(method_name),
+                             const_cast<char*>(argspec), args...);
+}
 
 }  // namespace py
 }  // namespace arrow

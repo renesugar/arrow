@@ -1,13 +1,12 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,8 +23,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-
-import com.google.common.collect.ImmutableList;
 
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.FieldVector;
@@ -48,7 +45,7 @@ public abstract class ArrowReader implements DictionaryProvider, AutoCloseable {
   protected final BufferAllocator allocator;
   private VectorLoader loader;
   private VectorSchemaRoot root;
-  private Map<Long, Dictionary> dictionaries;
+  protected Map<Long, Dictionary> dictionaries;
   private boolean initialized = false;
 
   protected ArrowReader(BufferAllocator allocator) {
@@ -96,7 +93,7 @@ public abstract class ArrowReader implements DictionaryProvider, AutoCloseable {
    * Load the next ArrowRecordBatch to the vector schema root if available.
    *
    * @return true if a batch was read, false on EOS
-   * @throws IOException
+   * @throws IOException on error
    */
   public abstract boolean loadNextBatch() throws IOException;
 
@@ -111,7 +108,7 @@ public abstract class ArrowReader implements DictionaryProvider, AutoCloseable {
    * Close resources, including vector schema root and dictionary vectors, and the
    * underlying read source.
    *
-   * @throws IOException
+   * @throws IOException on error
    */
   @Override
   public void close() throws IOException {
@@ -123,7 +120,7 @@ public abstract class ArrowReader implements DictionaryProvider, AutoCloseable {
    * closeReadChannel is true then close the underlying read source, otherwise leave it open.
    *
    * @param closeReadSource Flag to control if closing the underlying read source
-   * @throws IOException
+   * @throws IOException on error
    */
   public void close(boolean closeReadSource) throws IOException {
     if (initialized) {
@@ -141,7 +138,7 @@ public abstract class ArrowReader implements DictionaryProvider, AutoCloseable {
   /**
    * Close the underlying read source.
    *
-   * @throws IOException
+   * @throws IOException on error
    */
   protected abstract void closeReadSource() throws IOException;
 
@@ -149,23 +146,14 @@ public abstract class ArrowReader implements DictionaryProvider, AutoCloseable {
    * Read the Schema from the source, will be invoked at the beginning the initialization.
    *
    * @return the read Schema
-   * @throws IOException
+   * @throws IOException on error
    */
   protected abstract Schema readSchema() throws IOException;
 
   /**
-   * Read a dictionary batch from the source, will be invoked after the schema has been read and
-   * called N times, where N is the number of dictionaries indicated by the schema Fields.
-   *
-   * @return the read ArrowDictionaryBatch
-   * @throws IOException
-   */
-  protected abstract ArrowDictionaryBatch readDictionary() throws IOException;
-
-  /**
    * Initialize if not done previously.
    *
-   * @throws IOException
+   * @throws IOException on error
    */
   protected void ensureInitialized() throws IOException {
     if (!initialized) {
@@ -175,9 +163,9 @@ public abstract class ArrowReader implements DictionaryProvider, AutoCloseable {
   }
 
   /**
-   * Reads the schema and initializes the vectors
+   * Reads the schema and initializes the vectors.
    */
-  private void initialize() throws IOException {
+  protected void initialize() throws IOException {
     Schema originalSchema = readSchema();
     List<Field> fields = new ArrayList<>();
     List<FieldVector> vectors = new ArrayList<>();
@@ -194,18 +182,12 @@ public abstract class ArrowReader implements DictionaryProvider, AutoCloseable {
     this.root = new VectorSchemaRoot(schema, vectors, 0);
     this.loader = new VectorLoader(root);
     this.dictionaries = Collections.unmodifiableMap(dictionaries);
-
-    // Read and load all dictionaries from schema
-    for (int i = 0; i < dictionaries.size(); i++) {
-      ArrowDictionaryBatch dictionaryBatch = readDictionary();
-      loadDictionary(dictionaryBatch);
-    }
   }
 
   /**
    * Ensure the reader has been initialized and reset the VectorSchemaRoot row count to 0.
    *
-   * @throws IOException
+   * @throws IOException on error
    */
   protected void prepareLoadNextBatch() throws IOException {
     ensureInitialized();
@@ -228,7 +210,7 @@ public abstract class ArrowReader implements DictionaryProvider, AutoCloseable {
   /**
    * Load an ArrowDictionaryBatch to the readers dictionary vectors.
    *
-   * @param dictionaryBatch
+   * @param dictionaryBatch dictionary batch to load
    */
   protected void loadDictionary(ArrowDictionaryBatch dictionaryBatch) {
     long id = dictionaryBatch.getDictionaryId();
@@ -237,7 +219,9 @@ public abstract class ArrowReader implements DictionaryProvider, AutoCloseable {
       throw new IllegalArgumentException("Dictionary ID " + id + " not defined in schema");
     }
     FieldVector vector = dictionary.getVector();
-    VectorSchemaRoot root = new VectorSchemaRoot(ImmutableList.of(vector.getField()), ImmutableList.of(vector), 0);
+    VectorSchemaRoot root = new VectorSchemaRoot(
+        Collections.singletonList(vector.getField()),
+        Collections.singletonList(vector), 0);
     VectorLoader loader = new VectorLoader(root);
     try {
       loader.load(dictionaryBatch.getDictionary());

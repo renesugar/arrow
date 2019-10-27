@@ -18,21 +18,20 @@
 module Arrow
   class TableLoader
     class << self
-      def load(path, options={})
-        new(path, options).load
+      def load(input, options={})
+        new(input, options).load
       end
     end
 
-    def initialize(path, options={})
-      @path = path
+    def initialize(input, options={})
+      input = input.to_path if input.respond_to?(:to_path)
+      @input = input
       @options = options
+      fill_options
     end
 
     def load
-      path = @path
-      path = path.to_path if path.respond_to?(:to_path)
-      format = @options[:format] || guess_format(path) || :arrow
-
+      format = @options[:format]
       custom_load_method = "load_as_#{format}"
       unless respond_to?(custom_load_method, true)
         available_formats = []
@@ -47,37 +46,58 @@ module Arrow
         message << "]: #{format.inspect}"
         raise ArgumentError, message
       end
-      __send__(custom_load_method, path)
+      if method(custom_load_method).arity.zero?
+        __send__(custom_load_method)
+      else
+        # For backward compatibility.
+        __send__(custom_load_method, @input)
+      end
     end
 
     private
-    def guess_format(path)
-      extension = ::File.extname(path).gsub(/\A\./, "").downcase
-      return nil if extension.empty?
+    def fill_options
+      if @options[:format] and @options.key?(:compression)
+        return
+      end
 
-      return extension if respond_to?("load_as_#{extension}", true)
+      if @input.is_a?(Buffer)
+        info = {}
+      else
+        extension = PathExtension.new(@input)
+        info = extension.extract
+      end
+      format = info[:format]
+      @options = @options.dup
+      if format and respond_to?("load_as_#{format}", true)
+        @options[:format] ||= format.to_sym
+      else
+        @options[:format] ||= :arrow
+      end
+      unless @options.key?(:compression)
+        @options[:compression] = info[:compression]
+      end
+    end
 
-      nil
+    def open_input_stream
+      if @input.is_a?(Buffer)
+        BufferInputStream.new(@input)
+      else
+        MemoryMappedInputStream.new(@input)
+      end
     end
 
     def load_raw(input, reader)
       schema = reader.schema
-      chunked_arrays = []
+      record_batches = []
       reader.each do |record_batch|
-        record_batch.columns.each_with_index do |array, i|
-          chunked_array = (chunked_arrays[i] ||= [])
-          chunked_array << array
-        end
+        record_batches << record_batch
       end
-      columns = schema.fields.collect.with_index do |field, i|
-        Column.new(field, ChunkedArray.new(chunked_arrays[i]))
-      end
-      table = Table.new(schema, columns)
+      table = Table.new(schema, record_batches)
       table.instance_variable_set(:@input, input)
       table
     end
 
-    def load_as_arrow(path)
+    def load_as_arrow
       input = nil
       reader = nil
       error = nil
@@ -86,7 +106,7 @@ module Arrow
         RecordBatchStreamReader,
       ]
       reader_class_candidates.each do |reader_class_candidate|
-        input = MemoryMappedInputStream.new(path)
+        input = open_input_stream
         begin
           reader = reader_class_candidate.new(input)
         rescue Arrow::Error
@@ -99,32 +119,46 @@ module Arrow
       load_raw(input, reader)
     end
 
-    def load_as_batch(path)
-      input = MemoryMappedInputStream.new(path)
+    def load_as_batch
+      input = open_input_stream
       reader = RecordBatchFileReader.new(input)
       load_raw(input, reader)
     end
 
-    def load_as_stream(path)
-      input = MemoryMappedInputStream.new(path)
+    def load_as_stream
+      input = open_input_stream
       reader = RecordBatchStreamReader.new(input)
       load_raw(input, reader)
     end
 
     if Arrow.const_defined?(:ORCFileReader)
-      def load_as_orc(path)
-        input = MemoryMappedInputStream.new(path)
+      def load_as_orc
+        input = open_input_stream
         reader = ORCFileReader.new(input)
         field_indexes = @options[:field_indexes]
         reader.set_field_indexes(field_indexes) if field_indexes
-        reader.read_stripes
+        table = reader.read_stripes
+        table.instance_variable_set(:@input, input)
+        table
       end
     end
 
-    def load_as_csv(path)
+    def load_as_csv
       options = @options.dup
       options.delete(:format)
-      CSVLoader.load(Pathname.new(path), options)
+      if @input.is_a?(Buffer)
+        CSVLoader.load(@input.data.to_s, options)
+      else
+        CSVLoader.load(Pathname.new(@input), options)
+      end
+    end
+
+    def load_as_feather
+      input = open_input_stream
+      reader = FeatherFileReader.new(input)
+      table = reader.read
+      table.instance_variable_set(:@input, input)
+      table
     end
   end
 end

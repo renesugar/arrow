@@ -20,7 +20,6 @@ import pickle
 
 import pytest
 import numpy as np
-
 import pyarrow as pa
 
 
@@ -121,6 +120,10 @@ def test_type_for_alias():
         ('timestamp[ms]', pa.timestamp('ms')),
         ('timestamp[us]', pa.timestamp('us')),
         ('timestamp[ns]', pa.timestamp('ns')),
+        ('duration[s]', pa.duration('s')),
+        ('duration[ms]', pa.duration('ms')),
+        ('duration[us]', pa.duration('us')),
+        ('duration[ns]', pa.duration('ns')),
     ]
 
     for val, expected in cases:
@@ -178,7 +181,11 @@ def test_from_numpy_dtype():
         (np.dtype('datetime64[s]'), pa.timestamp('s')),
         (np.dtype('datetime64[ms]'), pa.timestamp('ms')),
         (np.dtype('datetime64[us]'), pa.timestamp('us')),
-        (np.dtype('datetime64[ns]'), pa.timestamp('ns'))
+        (np.dtype('datetime64[ns]'), pa.timestamp('ns')),
+        (np.dtype('timedelta64[s]'), pa.duration('s')),
+        (np.dtype('timedelta64[ms]'), pa.duration('ms')),
+        (np.dtype('timedelta64[us]'), pa.duration('us')),
+        (np.dtype('timedelta64[ns]'), pa.duration('ns')),
     ]
 
     for dt, pt in cases:
@@ -212,14 +219,17 @@ def test_schema():
     assert len(sch) == 3
     assert sch[0].name == 'foo'
     assert sch[0].type == fields[0].type
-    assert sch.field_by_name('foo').name == 'foo'
-    assert sch.field_by_name('foo').type == fields[0].type
+    assert sch.field('foo').name == 'foo'
+    assert sch.field('foo').type == fields[0].type
 
     assert repr(sch) == """\
 foo: int32
 bar: string
 baz: list<item: int8>
   child 0, item: int8"""
+
+    with pytest.raises(TypeError):
+        pa.schema([None])
 
 
 def test_schema_from_tuples():
@@ -238,6 +248,9 @@ bar: string
 baz: list<item: int8>
   child 0, item: int8"""
 
+    with pytest.raises(TypeError):
+        pa.schema([('foo', None)])
+
 
 def test_schema_from_mapping():
     fields = OrderedDict([
@@ -255,21 +268,51 @@ bar: string
 baz: list<item: int8>
   child 0, item: int8"""
 
+    fields = OrderedDict([('foo', None)])
+    with pytest.raises(TypeError):
+        pa.schema(fields)
+
+
+def test_schema_duplicate_fields():
+    fields = [
+        pa.field('foo', pa.int32()),
+        pa.field('bar', pa.string()),
+        pa.field('foo', pa.list_(pa.int8())),
+    ]
+    sch = pa.schema(fields)
+    assert sch.names == ['foo', 'bar', 'foo']
+    assert sch.types == [pa.int32(), pa.string(), pa.list_(pa.int8())]
+    assert len(sch) == 3
+    assert repr(sch) == """\
+foo: int32
+bar: string
+foo: list<item: int8>
+  child 0, item: int8"""
+
+    assert sch[0].name == 'foo'
+    assert sch[0].type == fields[0].type
+    with pytest.warns(FutureWarning):
+        assert sch.field_by_name('bar') == fields[1]
+    with pytest.warns(FutureWarning):
+        assert sch.field_by_name('xxx') is None
+    with pytest.warns((UserWarning, FutureWarning)):
+        assert sch.field_by_name('foo') is None
+
 
 def test_field_flatten():
-    f0 = pa.field('foo', pa.int32()).add_metadata({b'foo': b'bar'})
+    f0 = pa.field('foo', pa.int32()).with_metadata({b'foo': b'bar'})
     assert f0.flatten() == [f0]
 
     f1 = pa.field('bar', pa.float64(), nullable=False)
     ff = pa.field('ff', pa.struct([f0, f1]), nullable=False)
     assert ff.flatten() == [
-        pa.field('ff.foo', pa.int32()).add_metadata({b'foo': b'bar'}),
+        pa.field('ff.foo', pa.int32()).with_metadata({b'foo': b'bar'}),
         pa.field('ff.bar', pa.float64(), nullable=False)]  # XXX
 
     # Nullable parent makes flattened child nullable
     ff = pa.field('ff', pa.struct([f0, f1]))
     assert ff.flatten() == [
-        pa.field('ff.foo', pa.int32()).add_metadata({b'foo': b'bar'}),
+        pa.field('ff.foo', pa.int32()).with_metadata({b'foo': b'bar'}),
         pa.field('ff.bar', pa.float64())]
 
     fff = pa.field('fff', pa.struct([ff]))
@@ -289,7 +332,7 @@ def test_schema_add_remove_metadata():
 
     metadata = {b'foo': b'bar', b'pandas': b'badger'}
 
-    s2 = s1.add_metadata(metadata)
+    s2 = s1.with_metadata(metadata)
     assert s2.metadata == metadata
 
     s3 = s2.remove_metadata()
@@ -324,6 +367,29 @@ def test_schema_equals():
     assert not sch1.equals(sch3)
 
 
+def test_schema_equals_propagates_check_metadata():
+    # ARROW-4088
+    schema1 = pa.schema([
+        pa.field('foo', pa.int32()),
+        pa.field('bar', pa.string())
+    ])
+    schema2 = pa.schema([
+        pa.field('foo', pa.int32()),
+        pa.field('bar', pa.string(), metadata={'a': 'alpha'}),
+    ])
+    assert not schema1.equals(schema2)
+    assert schema1.equals(schema2, check_metadata=False)
+
+
+def test_schema_equals_invalid_type():
+    # ARROW-5873
+    schema = pa.schema([pa.field("a", pa.int64())])
+
+    for val in [None, 'string', pa.array([1, 2])]:
+        with pytest.raises(TypeError):
+            schema.equals(val)
+
+
 def test_schema_equality_operators():
     fields = [
         pa.field('foo', pa.int32()),
@@ -347,6 +413,27 @@ def test_schema_equality_operators():
     assert sch3 != 'foo'
 
 
+def test_schema_get_fields():
+    fields = [
+        pa.field('foo', pa.int32()),
+        pa.field('bar', pa.string()),
+        pa.field('baz', pa.list_(pa.int8()))
+    ]
+
+    schema = pa.schema(fields)
+
+    assert schema.field('foo').name == 'foo'
+    assert schema.field(0).name == 'foo'
+    assert schema.field(-1).name == 'baz'
+
+    with pytest.raises(KeyError):
+        schema.field('other')
+    with pytest.raises(TypeError):
+        schema.field(0.0)
+    with pytest.raises(IndexError):
+        schema.field(4)
+
+
 def test_schema_negative_indexing():
     fields = [
         pa.field('foo', pa.int32()),
@@ -368,9 +455,8 @@ def test_schema_negative_indexing():
 
 
 def test_schema_repr_with_dictionaries():
-    dct = pa.array(['foo', 'bar', 'baz'], type=pa.string())
     fields = [
-        pa.field('one', pa.dictionary(pa.int16(), dct)),
+        pa.field('one', pa.dictionary(pa.int16(), pa.string())),
         pa.field('two', pa.int32())
     ]
     sch = pa.schema(fields)
@@ -378,12 +464,6 @@ def test_schema_repr_with_dictionaries():
     expected = (
         """\
 one: dictionary<values=string, indices=int16, ordered=0>
-  dictionary:
-    [
-      "foo",
-      "bar",
-      "baz"
-    ]
 two: int32""")
 
     assert repr(sch) == expected
@@ -432,3 +512,33 @@ def test_type_schema_pickling():
     schema = pa.schema(fields, metadata={b'foo': b'bar'})
     roundtripped = pickle.loads(pickle.dumps(schema))
     assert schema == roundtripped
+
+
+def test_empty_table():
+    schema = pa.schema([
+        pa.field('oneField', pa.int64())
+    ])
+    table = schema.empty_table()
+    assert isinstance(table, pa.Table)
+    assert table.num_rows == 0
+    assert table.schema == schema
+
+
+@pytest.mark.pandas
+def test_schema_from_pandas():
+    import pandas as pd
+    inputs = [
+        list(range(10)),
+        pd.Categorical(list(range(10))),
+        ['foo', 'bar', None, 'baz', 'qux'],
+        np.array([
+            '2007-07-13T01:23:34.123456789',
+            '2006-01-13T12:34:56.432539784',
+            '2010-08-13T05:46:57.437699912'
+        ], dtype='datetime64[ns]')
+    ]
+    for data in inputs:
+        df = pd.DataFrame({'a': data})
+        schema = pa.Schema.from_pandas(df)
+        expected = pa.Table.from_pandas(df).schema
+        assert schema == expected

@@ -15,6 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
+import io
 import os
 import sys
 import tempfile
@@ -24,13 +25,24 @@ import pytest
 from numpy.testing import assert_array_equal
 import numpy as np
 
-from pandas.util.testing import assert_frame_equal
-import pandas as pd
-
 import pyarrow as pa
 from pyarrow.feather import (read_feather, write_feather,
                              read_table, FeatherReader, FeatherDataset)
 from pyarrow.lib import FeatherWriter
+
+
+try:
+    from pandas.util.testing import assert_frame_equal
+    import pandas as pd
+    import pyarrow.pandas_compat
+except ImportError:
+    pass
+
+
+# TODO(wesm): The Feather tests currently are tangled with pandas
+# dependency. We should isolate the pandas-depending parts and mark those with
+# pytest.mark.pandas
+pytestmark = pytest.mark.pandas
 
 
 def random_path(prefix='feather_'):
@@ -58,7 +70,8 @@ class TestFeatherReader(unittest.TestCase):
         counts = []
         for i in range(reader.num_columns):
             col = reader.get_column(i)
-            if columns is None or col.name in columns:
+            name = reader.get_column_name(i)
+            if columns is None or name in columns:
                 counts.append(col.null_count)
 
         return counts
@@ -503,7 +516,11 @@ class TestFeatherReader(unittest.TestCase):
         result = read_feather(buf)
         assert_frame_equal(result, df)
 
+    @pytest.mark.filterwarnings("ignore:Sparse:FutureWarning")
+    @pytest.mark.filterwarnings("ignore:DataFrame.to_sparse:FutureWarning")
     def test_sparse_dataframe(self):
+        if not pa.pandas_compat._pandas_api.has_sparse:
+            pytest.skip("version of pandas does not support SparseDataFrame")
         # GH #221
         data = {'A': [0, 1, 2],
                 'B': [1, 0, 1]}
@@ -535,3 +552,20 @@ class TestFeatherReader(unittest.TestCase):
     def test_large_dataframe(self):
         df = pd.DataFrame({'A': np.arange(400000000)})
         self._check_pandas_roundtrip(df)
+
+
+@pytest.mark.large_memory
+def test_chunked_binary_error_message():
+    # ARROW-3058: As Feather does not yet support chunked columns, we at least
+    # make sure it's clear to the user what is going on
+
+    # 2^31 + 1 bytes
+    values = [b'x'] + [
+        b'x' * (1 << 20)
+    ] * 2 * (1 << 10)
+    df = pd.DataFrame({'byte_col': values})
+
+    with pytest.raises(ValueError, match="'byte_col' exceeds 2GB maximum "
+                       "capacity of a Feather binary column. This restriction "
+                       "may be lifted in the future"):
+        write_feather(df, io.BytesIO())

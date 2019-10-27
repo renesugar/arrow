@@ -23,8 +23,8 @@
 #include <vector>
 
 #include "arrow/python/serialize.h"
+#include "arrow/python/visibility.h"
 #include "arrow/status.h"
-#include "arrow/util/visibility.h"
 
 namespace arrow {
 
@@ -43,21 +43,22 @@ namespace py {
 /// \param[in] src a RandomAccessFile
 /// \param[out] out the reconstructed data
 /// \return Status
-ARROW_EXPORT
+ARROW_PYTHON_EXPORT
 Status ReadSerializedObject(io::RandomAccessFile* src, SerializedPyObject* out);
 
 /// \brief Reconstruct SerializedPyObject from representation produced by
 /// SerializedPyObject::GetComponents.
 ///
 /// \param[in] num_tensors number of tensors in the object
+/// \param[in] num_ndarrays number of numpy Ndarrays in the object
 /// \param[in] num_buffers number of buffers in the object
 /// \param[in] data a list containing pyarrow.Buffer instances. Must be 1 +
 /// num_tensors * 2 + num_buffers in length
 /// \param[out] out the reconstructed object
 /// \return Status
-ARROW_EXPORT
-Status GetSerializedFromComponents(int num_tensors, int num_buffers, PyObject* data,
-                                   SerializedPyObject* out);
+ARROW_PYTHON_EXPORT
+Status GetSerializedFromComponents(int num_tensors, int num_ndarrays, int num_buffers,
+                                   PyObject* data, SerializedPyObject* out);
 
 /// \brief Reconstruct Python object from Arrow-serialized representation
 /// \param[in] context Serialization context which contains custom serialization
@@ -71,19 +72,19 @@ Status GetSerializedFromComponents(int num_tensors, int num_buffers, PyObject* d
 /// \param[out] out The returned object
 /// \return Status
 /// This acquires the GIL
-ARROW_EXPORT
+ARROW_PYTHON_EXPORT
 Status DeserializeObject(PyObject* context, const SerializedPyObject& object,
                          PyObject* base, PyObject** out);
 
-/// \brief Reconstruct Tensor from Arrow-serialized representation
+/// \brief Reconstruct Ndarray from Arrow-serialized representation
 /// \param[in] object Object to deserialize
 /// \param[out] out The deserialized tensor
 /// \return Status
-ARROW_EXPORT
-Status DeserializeTensor(const SerializedPyObject& object, std::shared_ptr<Tensor>* out);
+ARROW_PYTHON_EXPORT
+Status DeserializeNdarray(const SerializedPyObject& object, std::shared_ptr<Tensor>* out);
 
-ARROW_EXPORT
-Status ReadTensor(std::shared_ptr<Buffer> src, std::shared_ptr<Tensor>* out);
+ARROW_PYTHON_EXPORT
+Status NdarrayFromBuffer(std::shared_ptr<Buffer> src, std::shared_ptr<Tensor>* out);
 
 }  // namespace py
 }  // namespace arrow

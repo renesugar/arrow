@@ -17,6 +17,8 @@
 
 import numpy as np
 import pandas as pd
+import pandas.util.testing as tm
+
 import pyarrow as pa
 
 
@@ -50,6 +52,26 @@ class PandasConversionsFromArrow(PandasConversionsBase):
         self.arrow_data.to_pandas()
 
 
+class ToPandasStrings(object):
+
+    param_names = ('uniqueness', 'total')
+    params = ((0.001, 0.01, 0.1, 0.5), (1000000,))
+    string_length = 25
+
+    def setup(self, uniqueness, total):
+        nunique = int(total * uniqueness)
+        unique_values = [tm.rands(self.string_length) for i in range(nunique)]
+        values = unique_values * (total // nunique)
+        self.arr = pa.array(values, type=pa.string())
+        self.table = pa.Table.from_arrays([self.arr], ['f0'])
+
+    def time_to_pandas_dedup(self, *args):
+        self.arr.to_pandas()
+
+    def time_to_pandas_no_dedup(self, *args):
+        self.arr.to_pandas(deduplicate_objects=False)
+
+
 class ZeroCopyPandasRead(object):
 
     def setup(self):
@@ -68,3 +90,32 @@ class ZeroCopyPandasRead(object):
 
     def time_deserialize_from_components(self):
         pa.deserialize_components(self.as_components)
+
+
+class SerializeDeserializePandas(object):
+
+    def setup(self):
+        # 10 million length
+        n = 10000000
+        self.df = pd.DataFrame({'data': np.random.randn(n)})
+        self.serialized = pa.serialize_pandas(self.df)
+
+    def time_serialize_pandas(self):
+        pa.serialize_pandas(self.df)
+
+    def time_deserialize_pandas(self):
+        pa.deserialize_pandas(self.serialized)
+
+
+class TableFromPandasMicroperformance(object):
+    # ARROW-4629
+
+    def setup(self):
+        ser = pd.Series(range(10000))
+        df = pd.DataFrame({col: ser.copy(deep=True) for col in range(100)})
+        # Simulate a real dataset by converting some columns to strings
+        self.df = df.astype({col: str for col in range(50)})
+
+    def time_Table_from_pandas(self):
+        for _ in range(50):
+            pa.Table.from_pandas(self.df, nthreads=1)

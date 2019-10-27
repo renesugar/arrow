@@ -18,17 +18,25 @@
 #ifndef ARROW_COMPUTE_CONTEXT_H
 #define ARROW_COMPUTE_CONTEXT_H
 
+#include <cstdint>
 #include <memory>
 
 #include "arrow/memory_pool.h"
 #include "arrow/status.h"
-#include "arrow/type_fwd.h"
+#include "arrow/util/macros.h"
 #include "arrow/util/visibility.h"
 
 namespace arrow {
+
+class Buffer;
+
+namespace internal {
+class CpuInfo;
+}  // namespace internal
+
 namespace compute {
 
-#define RETURN_IF_ERROR(ctx)                  \
+#define ARROW_RETURN_IF_ERROR(ctx)            \
   if (ARROW_PREDICT_FALSE(ctx->HasError())) { \
     Status s = ctx->status();                 \
     ctx->ResetStatus();                       \
@@ -60,9 +68,12 @@ class ARROW_EXPORT FunctionContext {
   /// \brief Return the current status of the context
   const Status& status() const { return status_; }
 
+  internal::CpuInfo* cpu_info() const { return cpu_info_; }
+
  private:
   Status status_;
   MemoryPool* pool_;
+  internal::CpuInfo* cpu_info_;
 };
 
 }  // namespace compute

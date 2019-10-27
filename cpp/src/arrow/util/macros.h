@@ -18,11 +18,22 @@
 #ifndef ARROW_UTIL_MACROS_H
 #define ARROW_UTIL_MACROS_H
 
+#include <cstdint>
+
+#define ARROW_STRINGIFY(x) #x
+#define ARROW_CONCAT(x, y) x##y
+
 // From Google gutil
 #ifndef ARROW_DISALLOW_COPY_AND_ASSIGN
 #define ARROW_DISALLOW_COPY_AND_ASSIGN(TypeName) \
   TypeName(const TypeName&) = delete;            \
   void operator=(const TypeName&) = delete
+#endif
+
+#ifndef ARROW_DEFAULT_MOVE_AND_ASSIGN
+#define ARROW_DEFAULT_MOVE_AND_ASSIGN(TypeName) \
+  TypeName(TypeName&&) = default;               \
+  TypeName& operator=(TypeName&&) = default
 #endif
 
 #define ARROW_UNUSED(x) (void)x
@@ -76,7 +87,11 @@
 // clang-format off
 // [[deprecated]] is only available in C++14, use this for the time being
 // This macro takes an optional deprecation message
-#if __cplusplus <= 201103L
+#ifdef __COVERITY__
+#  define ARROW_DEPRECATED(...)
+#elif __cplusplus > 201103L
+#  define ARROW_DEPRECATED(...) [[deprecated(__VA_ARGS__)]]
+#else
 # ifdef __GNUC__
 #  define ARROW_DEPRECATED(...) __attribute__((deprecated(__VA_ARGS__)))
 # elif defined(_MSC_VER)
@@ -84,8 +99,6 @@
 # else
 #  define ARROW_DEPRECATED(...)
 # endif
-#else
-#  define ARROW_DEPRECATED(...) [[deprecated(__VA_ARGS__)]]
 #endif
 
 // ----------------------------------------------------------------------
@@ -110,6 +123,26 @@
 #error Unknown compiler, please define structure alignment macros
 #endif
 #endif  // !defined(MANUALLY_ALIGNED_STRUCT)
+
+// ----------------------------------------------------------------------
+// Convenience macro disabling a particular UBSan check in a function
+
+#if defined(__clang__)
+#define ARROW_DISABLE_UBSAN(feature) __attribute__((no_sanitize(feature)))
+#else
+#define ARROW_DISABLE_UBSAN(feature)
+#endif
+
+// ----------------------------------------------------------------------
+// Machine information
+
+#if INTPTR_MAX == INT64_MAX
+#define ARROW_BITNESS 64
+#elif INTPTR_MAX == INT32_MAX
+#define ARROW_BITNESS 32
+#else
+#error Unexpected INTPTR_MAX
+#endif
 
 // ----------------------------------------------------------------------
 // From googletest

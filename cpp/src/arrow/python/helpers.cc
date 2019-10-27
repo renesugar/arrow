@@ -33,6 +33,9 @@
 #include <arrow/api.h>
 
 namespace arrow {
+
+using internal::checked_cast;
+
 namespace py {
 
 #define GET_PRIMITIVE_TYPE(NAME, FACTORY) \
@@ -59,6 +62,8 @@ std::shared_ptr<DataType> GetPrimitiveType(Type::type type) {
       GET_PRIMITIVE_TYPE(DOUBLE, float64);
       GET_PRIMITIVE_TYPE(BINARY, binary);
       GET_PRIMITIVE_TYPE(STRING, utf8);
+      GET_PRIMITIVE_TYPE(LARGE_BINARY, large_binary);
+      GET_PRIMITIVE_TYPE(LARGE_STRING, large_utf8);
     default:
       return nullptr;
   }
@@ -117,13 +122,13 @@ std::string PyObject_StdStringRepr(PyObject* obj) {
   }
 #else
   OwnedRef bytes_ref(PyObject_Repr(obj));
+#endif
   if (!bytes_ref) {
     PyErr_Clear();
     std::stringstream ss;
     ss << "<object of type '" << Py_TYPE(obj)->tp_name << "' repr() failed>";
     return ss.str();
   }
-#endif
   return PyBytes_AsStdString(bytes_ref.obj());
 }
 
@@ -141,18 +146,13 @@ Status PyObject_StdStringStr(PyObject* obj, std::string* out) {
 Status ImportModule(const std::string& module_name, OwnedRef* ref) {
   PyObject* module = PyImport_ImportModule(module_name.c_str());
   RETURN_IF_PYERROR();
-  DCHECK_NE(module, nullptr) << "unable to import the " << module_name << " module";
   ref->reset(module);
   return Status::OK();
 }
 
-Status ImportFromModule(const OwnedRef& module, const std::string& name, OwnedRef* ref) {
-  /// Assumes that ImportModule was called first
-  DCHECK_NE(module.obj(), nullptr) << "Cannot import from nullptr Python module";
-
-  PyObject* attr = PyObject_GetAttrString(module.obj(), name.c_str());
+Status ImportFromModule(PyObject* module, const std::string& name, OwnedRef* ref) {
+  PyObject* attr = PyObject_GetAttrString(module, name.c_str());
   RETURN_IF_PYERROR();
-  DCHECK_NE(attr, nullptr) << "unable to import the " << name << " object";
   ref->reset(attr);
   return Status::OK();
 }
@@ -161,11 +161,10 @@ namespace {
 
 Status IntegerOverflowStatus(PyObject* obj, const std::string& overflow_message) {
   if (overflow_message.empty()) {
-    std::stringstream ss;
     std::string obj_as_stdstring;
     RETURN_NOT_OK(PyObject_StdStringStr(obj, &obj_as_stdstring));
-    ss << "Value " << obj_as_stdstring << " too large to fit in C integer type";
-    return Status::Invalid(ss.str());
+    return Status::Invalid("Value ", obj_as_stdstring,
+                           " too large to fit in C integer type");
   } else {
     return Status::Invalid(overflow_message);
   }
@@ -296,13 +295,17 @@ bool PandasObjectIsNull(PyObject* obj) {
 }
 
 Status InvalidValue(PyObject* obj, const std::string& why) {
-  std::stringstream ss;
-
   std::string obj_as_str;
   RETURN_NOT_OK(internal::PyObject_StdStringStr(obj, &obj_as_str));
-  ss << "Could not convert " << obj_as_str << " with type " << Py_TYPE(obj)->tp_name
-     << ": " << why;
-  return Status::Invalid(ss.str());
+  return Status::Invalid("Could not convert ", obj_as_str, " with type ",
+                         Py_TYPE(obj)->tp_name, ": ", why);
+}
+
+Status InvalidType(PyObject* obj, const std::string& why) {
+  std::string obj_as_str;
+  RETURN_NOT_OK(internal::PyObject_StdStringStr(obj, &obj_as_str));
+  return Status::TypeError("Could not convert ", obj_as_str, " with type ",
+                           Py_TYPE(obj)->tp_name, ": ", why);
 }
 
 Status UnboxIntegerAsInt64(PyObject* obj, int64_t* out) {
@@ -352,10 +355,8 @@ Status IntegerScalarToDoubleSafe(PyObject* obj, double* out) {
   constexpr int64_t kDoubleMin = -(1LL << 53);
 
   if (value < kDoubleMin || value > kDoubleMax) {
-    std::stringstream ss;
-    ss << "Integer value " << value << " is outside of the range exactly"
-       << " representable by a IEEE 754 double precision value";
-    return Status::Invalid(ss.str());
+    return Status::Invalid("Integer value ", value, " is outside of the range exactly",
+                           " representable by a IEEE 754 double precision value");
   }
   *out = static_cast<double>(value);
   return Status::OK();
@@ -369,13 +370,16 @@ Status IntegerScalarToFloat32Safe(PyObject* obj, float* out) {
   constexpr int64_t kFloatMin = -(1LL << 24);
 
   if (value < kFloatMin || value > kFloatMax) {
-    std::stringstream ss;
-    ss << "Integer value " << value << " is outside of the range exactly"
-       << " representable by a IEEE 754 single precision value";
-    return Status::Invalid(ss.str());
+    return Status::Invalid("Integer value ", value, " is outside of the range exactly",
+                           " representable by a IEEE 754 single precision value");
   }
   *out = static_cast<float>(value);
   return Status::OK();
+}
+
+void DebugPrint(PyObject* obj) {
+  std::string repr = PyObject_StdStringRepr(obj);
+  PySys_WriteStderr("%s\n", repr.c_str());
 }
 
 }  // namespace internal

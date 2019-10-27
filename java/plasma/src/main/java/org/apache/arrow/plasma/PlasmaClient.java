@@ -1,33 +1,33 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.arrow.plasma;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 
-
+import org.apache.arrow.plasma.exceptions.DuplicateObjectException;
+import org.apache.arrow.plasma.exceptions.PlasmaOutOfMemoryException;
 
 /**
  * The PlasmaClient is used to interface with a plasma store and manager.
  *
- * The PlasmaClient can ask the PlasmaStore to allocate a new buffer, seal a buffer, and get a
+ * <p>The PlasmaClient can ask the PlasmaStore to allocate a new buffer, seal a buffer, and get a
  * buffer. Buffers are referred to by object IDs.
  */
 public class PlasmaClient implements ObjectStoreLink {
@@ -46,18 +46,9 @@ public class PlasmaClient implements ObjectStoreLink {
   // interface methods --------------------
 
   @Override
-  public void put(byte[] objectId, byte[] value, byte[] metadata) {
-    ByteBuffer buf = null;
-    try {
-      buf = PlasmaClientJNI.create(conn, objectId, value.length, metadata);
-    } catch (Exception e) {
-      System.err.println("ObjectId " + objectId + " error at PlasmaClient put");
-      e.printStackTrace();
-    }
-    if (buf == null) {
-      return;
-    }
-
+  public void put(byte[] objectId, byte[] value, byte[] metadata)
+          throws DuplicateObjectException, PlasmaOutOfMemoryException {
+    ByteBuffer buf = PlasmaClientJNI.create(conn, objectId, value.length, metadata);
     buf.put(value);
     PlasmaClientJNI.seal(conn, objectId);
     PlasmaClientJNI.release(conn, objectId);
@@ -83,31 +74,35 @@ public class PlasmaClient implements ObjectStoreLink {
   }
 
   @Override
-  public List<byte[]> wait(byte[][] objectIds, int timeoutMs, int numReturns) {
-    byte[][] readys = PlasmaClientJNI.wait(conn, objectIds, timeoutMs, numReturns);
-
-    List<byte[]> ret = new ArrayList<>();
-    for (byte[] ready : readys) {
-      for (byte[] id : objectIds) {
-        if (Arrays.equals(ready, id)) {
-          ret.add(id);
-          break;
-        }
-      }
-    }
-
-    assert (ret.size() == readys.length);
-    return ret;
-  }
-
-  @Override
   public byte[] hash(byte[] objectId) {
     return PlasmaClientJNI.hash(conn, objectId);
   }
 
   @Override
-  public void fetch(byte[][] objectIds) {
-    PlasmaClientJNI.fetch(conn, objectIds);
+  public List<ObjectStoreData> get(byte[][] objectIds, int timeoutMs) {
+    ByteBuffer[][] bufs = PlasmaClientJNI.get(conn, objectIds, timeoutMs);
+    assert bufs.length == objectIds.length;
+
+    List<ObjectStoreData> ret = new ArrayList<>();
+    for (int i = 0; i < bufs.length; i++) {
+      ByteBuffer databuf = bufs[i][0];
+      ByteBuffer metabuf = bufs[i][1];
+      if (databuf == null) {
+        ret.add(new ObjectStoreData(null, null));
+      } else {
+        byte[] data = new byte[databuf.remaining()];
+        databuf.get(data);
+        byte[] meta;
+        if (metabuf != null) {
+          meta = new byte[metabuf.remaining()];
+          metabuf.get(meta);
+        } else {
+          meta = null;
+        }
+        ret.add(new ObjectStoreData(meta, data));
+      }
+    }
+    return ret;
   }
 
   @Override
@@ -134,6 +129,16 @@ public class PlasmaClient implements ObjectStoreLink {
    */
   public void release(byte[] objectId) {
     PlasmaClientJNI.release(conn, objectId);
+  }
+
+  /**
+   * Removes object with given objectId from plasma store.
+   *
+   * @param objectId used to identify an object.
+   */
+  @Override
+  public void delete(byte[] objectId) {
+    PlasmaClientJNI.delete(conn, objectId);
   }
 
   /**

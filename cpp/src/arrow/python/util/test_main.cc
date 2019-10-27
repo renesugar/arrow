@@ -19,15 +19,21 @@
 
 #include <gtest/gtest.h>
 
+#include "arrow/python/datetime.h"
 #include "arrow/python/init.h"
+#include "arrow/python/pyarrow.h"
 
 int main(int argc, char** argv) {
   ::testing::InitGoogleTest(&argc, argv);
 
   Py_Initialize();
-  arrow_init_numpy();
+  int ret = arrow_init_numpy();
+  if (ret != 0) {
+    return ret;
+  }
+  ::arrow::py::internal::InitDatetime();
 
-  int ret = RUN_ALL_TESTS();
+  ret = RUN_ALL_TESTS();
 
   Py_Finalize();
 

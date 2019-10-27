@@ -1,13 +1,12 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,6 +17,12 @@
 
 package org.apache.arrow.vector.ipc;
 
+import static java.nio.channels.Channels.newChannel;
+import static org.apache.arrow.vector.TestUtils.newVarCharVector;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -25,22 +30,22 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.Lists;
-
 import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.util.Collections2;
 import org.apache.arrow.vector.FieldVector;
 import org.apache.arrow.vector.FixedSizeBinaryVector;
 import org.apache.arrow.vector.Float4Vector;
 import org.apache.arrow.vector.IntVector;
 import org.apache.arrow.vector.TinyIntVector;
+import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.VectorUnloader;
 import org.apache.arrow.vector.complex.FixedSizeListVector;
@@ -99,7 +104,8 @@ public class TestArrowFile extends BaseFileTest {
     int count = COUNT;
 
     // write
-    try (BufferAllocator originalVectorAllocator = allocator.newChildAllocator("original vectors", 0, Integer.MAX_VALUE);
+    try (BufferAllocator originalVectorAllocator =
+           allocator.newChildAllocator("original vectors", 0, Integer.MAX_VALUE);
          StructVector parent = StructVector.empty("parent", originalVectorAllocator)) {
       writeData(count, parent);
       write(parent.getChild("root"), file, stream);
@@ -116,11 +122,11 @@ public class TestArrowFile extends BaseFileTest {
       LOGGER.debug("reading schema: " + schema);
       for (ArrowBlock rbBlock : arrowReader.getRecordBlocks()) {
         arrowReader.loadRecordBatch(rbBlock);
-        Assert.assertEquals(count, root.getRowCount());
+        assertEquals(count, root.getRowCount());
         ArrowRecordBatch batch = unloader.getRecordBatch();
         List<ArrowBuffer> buffersLayout = batch.getBuffersLayout();
         for (ArrowBuffer arrowBuffer : buffersLayout) {
-          Assert.assertEquals(0, arrowBuffer.getOffset() % 8);
+          assertEquals(0, arrowBuffer.getOffset() % 8);
         }
         validateContent(count, root);
         batch.close();
@@ -140,10 +146,10 @@ public class TestArrowFile extends BaseFileTest {
       ArrowRecordBatch batch = unloader.getRecordBatch();
       List<ArrowBuffer> buffersLayout = batch.getBuffersLayout();
       for (ArrowBuffer arrowBuffer : buffersLayout) {
-        Assert.assertEquals(0, arrowBuffer.getOffset() % 8);
+        assertEquals(0, arrowBuffer.getOffset() % 8);
       }
       batch.close();
-      Assert.assertEquals(count, root.getRowCount());
+      assertEquals(count, root.getRowCount());
       validateContent(count, root);
     }
   }
@@ -155,7 +161,8 @@ public class TestArrowFile extends BaseFileTest {
     int count = COUNT;
 
     // write
-    try (BufferAllocator originalVectorAllocator = allocator.newChildAllocator("original vectors", 0, Integer.MAX_VALUE);
+    try (BufferAllocator originalVectorAllocator =
+           allocator.newChildAllocator("original vectors", 0, Integer.MAX_VALUE);
          StructVector parent = StructVector.empty("parent", originalVectorAllocator)) {
       writeComplexData(count, parent);
       write(parent.getChild("root"), file, stream);
@@ -171,7 +178,7 @@ public class TestArrowFile extends BaseFileTest {
 
       for (ArrowBlock rbBlock : arrowReader.getRecordBlocks()) {
         arrowReader.loadRecordBatch(rbBlock);
-        Assert.assertEquals(count, root.getRowCount());
+        assertEquals(count, root.getRowCount());
         validateComplexContent(count, root);
       }
     }
@@ -184,7 +191,7 @@ public class TestArrowFile extends BaseFileTest {
       Schema schema = root.getSchema();
       LOGGER.debug("reading schema: " + schema);
       Assert.assertTrue(arrowReader.loadNextBatch());
-      Assert.assertEquals(count, root.getRowCount());
+      assertEquals(count, root.getRowCount());
       validateComplexContent(count, root);
     }
   }
@@ -196,7 +203,8 @@ public class TestArrowFile extends BaseFileTest {
     int[] counts = {10, 5};
 
     // write
-    try (BufferAllocator originalVectorAllocator = allocator.newChildAllocator("original vectors", 0, Integer.MAX_VALUE);
+    try (BufferAllocator originalVectorAllocator =
+           allocator.newChildAllocator("original vectors", 0, Integer.MAX_VALUE);
          StructVector parent = StructVector.empty("parent", originalVectorAllocator);
          FileOutputStream fileOutputStream = new FileOutputStream(file)) {
       writeData(counts[0], parent);
@@ -211,7 +219,8 @@ public class TestArrowFile extends BaseFileTest {
         streamWriter.writeBatch();
 
         parent.allocateNew();
-        writeData(counts[1], parent); // if we write the same data we don't catch that the metadata is stored in the wrong order.
+        // if we write the same data we don't catch that the metadata is stored in the wrong order.
+        writeData(counts[1], parent);
         root.setRowCount(counts[1]);
 
         fileWriter.writeBatch();
@@ -231,13 +240,13 @@ public class TestArrowFile extends BaseFileTest {
       LOGGER.debug("reading schema: " + schema);
       int i = 0;
       List<ArrowBlock> recordBatches = arrowReader.getRecordBlocks();
-      Assert.assertEquals(2, recordBatches.size());
+      assertEquals(2, recordBatches.size());
       long previousOffset = 0;
       for (ArrowBlock rbBlock : recordBatches) {
         Assert.assertTrue(rbBlock.getOffset() + " > " + previousOffset, rbBlock.getOffset() > previousOffset);
         previousOffset = rbBlock.getOffset();
         arrowReader.loadRecordBatch(rbBlock);
-        Assert.assertEquals("RB #" + i, counts[i], root.getRowCount());
+        assertEquals("RB #" + i, counts[i], root.getRowCount());
         validateContent(counts[i], root);
         ++i;
       }
@@ -254,7 +263,7 @@ public class TestArrowFile extends BaseFileTest {
 
       for (int n = 0; n < 2; n++) {
         Assert.assertTrue(arrowReader.loadNextBatch());
-        Assert.assertEquals("RB #" + i, counts[i], root.getRowCount());
+        assertEquals("RB #" + i, counts[i], root.getRowCount());
         validateContent(counts[i], root);
         ++i;
       }
@@ -353,11 +362,11 @@ public class TestArrowFile extends BaseFileTest {
   }
 
   private void validateTinyData(VectorSchemaRoot root) {
-    Assert.assertEquals(16, root.getRowCount());
+    assertEquals(16, root.getRowCount());
     TinyIntVector vector = (TinyIntVector) root.getFieldVectors().get(0);
     for (int i = 0; i < 16; i++) {
       if (i < 8) {
-        Assert.assertEquals((byte) (i + 1), vector.get(i));
+        assertEquals((byte) (i + 1), vector.get(i));
       } else {
         Assert.assertTrue(vector.isNull(i));
       }
@@ -369,26 +378,28 @@ public class TestArrowFile extends BaseFileTest {
     File file = new File("target/mytest_metadata.arrow");
     ByteArrayOutputStream stream = new ByteArrayOutputStream();
 
-    List<Field> childFields = new ArrayList<Field>();
+    List<Field> childFields = new ArrayList<>();
     childFields.add(new Field("varchar-child", new FieldType(true, ArrowType.Utf8.INSTANCE, null, metadata(1)), null));
-    childFields.add(new Field("float-child", new FieldType(true, new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE), null, metadata(2)), null));
+    childFields.add(new Field("float-child",
+        new FieldType(true, new ArrowType.FloatingPoint(FloatingPointPrecision.SINGLE), null, metadata(2)), null));
     childFields.add(new Field("int-child", new FieldType(false, new ArrowType.Int(32, true), null, metadata(3)), null));
     childFields.add(new Field("list-child", new FieldType(true, ArrowType.List.INSTANCE, null, metadata(4)),
-        ImmutableList.of(new Field("l1", FieldType.nullable(new ArrowType.Int(16, true)), null))));
+        Collections2.asImmutableList(new Field("l1", FieldType.nullable(new ArrowType.Int(16, true)), null))));
     Field field = new Field("meta", new FieldType(true, ArrowType.Struct.INSTANCE, null, metadata(0)), childFields);
     Map<String, String> metadata = new HashMap<>();
     metadata.put("s1", "v1");
     metadata.put("s2", "v2");
-    Schema originalSchema = new Schema(ImmutableList.of(field), metadata);
-    Assert.assertEquals(metadata, originalSchema.getCustomMetadata());
+    Schema originalSchema = new Schema(Collections2.asImmutableList(field), metadata);
+    assertEquals(metadata, originalSchema.getCustomMetadata());
 
     // write
-    try (BufferAllocator originalVectorAllocator = allocator.newChildAllocator("original vectors", 0, Integer.MAX_VALUE);
+    try (BufferAllocator originalVectorAllocator =
+           allocator.newChildAllocator("original vectors", 0, Integer.MAX_VALUE);
          StructVector vector = (StructVector) field.createVector(originalVectorAllocator)) {
       vector.allocateNewSafe();
       vector.setValueCount(0);
 
-      List<FieldVector> vectors = ImmutableList.<FieldVector>of(vector);
+      List<FieldVector> vectors = Collections2.asImmutableList(vector);
       VectorSchemaRoot root = new VectorSchemaRoot(originalSchema, vectors, 0);
 
       try (FileOutputStream fileOutputStream = new FileOutputStream(file);
@@ -411,12 +422,12 @@ public class TestArrowFile extends BaseFileTest {
       VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
       Schema schema = root.getSchema();
       LOGGER.debug("reading schema: " + schema);
-      Assert.assertEquals(originalSchema, schema);
-      Assert.assertEquals(originalSchema.getCustomMetadata(), schema.getCustomMetadata());
+      assertEquals(originalSchema, schema);
+      assertEquals(originalSchema.getCustomMetadata(), schema.getCustomMetadata());
       Field top = schema.getFields().get(0);
-      Assert.assertEquals(metadata(0), top.getMetadata());
+      assertEquals(metadata(0), top.getMetadata());
       for (int i = 0; i < 4; i++) {
-        Assert.assertEquals(metadata(i + 1), top.getChildren().get(i).getMetadata());
+        assertEquals(metadata(i + 1), top.getChildren().get(i).getMetadata());
       }
     }
 
@@ -427,18 +438,21 @@ public class TestArrowFile extends BaseFileTest {
       VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
       Schema schema = root.getSchema();
       LOGGER.debug("reading schema: " + schema);
-      Assert.assertEquals(originalSchema, schema);
-      Assert.assertEquals(originalSchema.getCustomMetadata(), schema.getCustomMetadata());
+      assertEquals(originalSchema, schema);
+      assertEquals(originalSchema.getCustomMetadata(), schema.getCustomMetadata());
       Field top = schema.getFields().get(0);
-      Assert.assertEquals(metadata(0), top.getMetadata());
+      assertEquals(metadata(0), top.getMetadata());
       for (int i = 0; i < 4; i++) {
-        Assert.assertEquals(metadata(i + 1), top.getChildren().get(i).getMetadata());
+        assertEquals(metadata(i + 1), top.getChildren().get(i).getMetadata());
       }
     }
   }
 
   private Map<String, String> metadata(int i) {
-    return ImmutableMap.of("k_" + i, "v_" + i, "k2_" + i, "v2_" + i);
+    Map<String, String> map = new HashMap<>();
+    map.put("k_" + i, "v_" + i);
+    map.put("k2_" + i, "v2_" + i);
+    return Collections.unmodifiableMap(map);
   }
 
   @Test
@@ -448,7 +462,8 @@ public class TestArrowFile extends BaseFileTest {
     int numDictionaryBlocksWritten = 0;
 
     // write
-    try (BufferAllocator originalVectorAllocator = allocator.newChildAllocator("original vectors", 0, Integer.MAX_VALUE)) {
+    try (BufferAllocator originalVectorAllocator =
+           allocator.newChildAllocator("original vectors", 0, Integer.MAX_VALUE)) {
 
       MapDictionaryProvider provider = new MapDictionaryProvider();
 
@@ -481,7 +496,7 @@ public class TestArrowFile extends BaseFileTest {
       LOGGER.debug("reading schema: " + schema);
       Assert.assertTrue(arrowReader.loadNextBatch());
       validateFlatDictionary(root, arrowReader);
-      Assert.assertEquals(numDictionaryBlocksWritten, arrowReader.getDictionaryBlocks().size());
+      assertEquals(numDictionaryBlocksWritten, arrowReader.getDictionaryBlocks().size());
     }
 
     // Read from stream
@@ -562,18 +577,20 @@ public class TestArrowFile extends BaseFileTest {
     final int numValues = 10;
     final int typeWidth = 11;
     byte[][] byteValues = new byte[numValues][typeWidth];
-    for (int i=0; i<numValues; i++) {
-      for (int j=0; j<typeWidth; j++) {
+    for (int i = 0; i < numValues; i++) {
+      for (int j = 0; j < typeWidth; j++) {
         byteValues[i][j] = ((byte) i);
       }
     }
 
     // write
-    try (BufferAllocator originalVectorAllocator = allocator.newChildAllocator("original vectors", 0, Integer.MAX_VALUE);
+    try (BufferAllocator originalVectorAllocator =
+           allocator.newChildAllocator("original vectors", 0, Integer.MAX_VALUE);
          StructVector parent = StructVector.empty("parent", originalVectorAllocator)) {
-      FixedSizeBinaryVector fixedSizeBinaryVector = parent.addOrGet("fixed-binary", FieldType.nullable(new FixedSizeBinary(typeWidth)), FixedSizeBinaryVector.class);
+      FixedSizeBinaryVector fixedSizeBinaryVector = parent.addOrGet("fixed-binary",
+          FieldType.nullable(new FixedSizeBinary(typeWidth)), FixedSizeBinaryVector.class);
       parent.allocateNew();
-      for (int i=0; i<numValues; i++) {
+      for (int i = 0; i < numValues; i++) {
         fixedSizeBinaryVector.set(i, byteValues[i]);
       }
       parent.setValueCount(numValues);
@@ -590,7 +607,7 @@ public class TestArrowFile extends BaseFileTest {
 
       for (ArrowBlock rbBlock : arrowReader.getRecordBlocks()) {
         arrowReader.loadRecordBatch(rbBlock);
-        Assert.assertEquals(numValues, root.getRowCount());
+        assertEquals(numValues, root.getRowCount());
         for (int i = 0; i < numValues; i++) {
           Assert.assertArrayEquals(byteValues[i], ((byte[]) root.getVector("fixed-binary").getObject(i)));
         }
@@ -605,7 +622,7 @@ public class TestArrowFile extends BaseFileTest {
       Schema schema = root.getSchema();
       LOGGER.debug("reading schema: " + schema);
       arrowReader.loadNextBatch();
-      Assert.assertEquals(numValues, root.getRowCount());
+      assertEquals(numValues, root.getRowCount());
       for (int i = 0; i < numValues; i++) {
         Assert.assertArrayEquals(byteValues[i], ((byte[]) root.getVector("fixed-binary").getObject(i)));
       }
@@ -619,10 +636,13 @@ public class TestArrowFile extends BaseFileTest {
     int count = COUNT;
 
     // write
-    try (BufferAllocator originalVectorAllocator = allocator.newChildAllocator("original vectors", 0, Integer.MAX_VALUE);
+    try (BufferAllocator originalVectorAllocator =
+           allocator.newChildAllocator("original vectors", 0, Integer.MAX_VALUE);
          StructVector parent = StructVector.empty("parent", originalVectorAllocator)) {
-      FixedSizeListVector tuples = parent.addOrGet("float-pairs", FieldType.nullable(new FixedSizeList(2)), FixedSizeListVector.class);
-      Float4Vector floats = (Float4Vector) tuples.addOrGetVector(FieldType.nullable(MinorType.FLOAT4.getType())).getVector();
+      FixedSizeListVector tuples = parent.addOrGet("float-pairs",
+          FieldType.nullable(new FixedSizeList(2)), FixedSizeListVector.class);
+      Float4Vector floats = (Float4Vector) tuples.addOrGetVector(FieldType.nullable(MinorType.FLOAT4.getType()))
+          .getVector();
       IntVector ints = parent.addOrGet("ints", FieldType.nullable(new Int(32, true)), IntVector.class);
       parent.allocateNew();
 
@@ -647,10 +667,11 @@ public class TestArrowFile extends BaseFileTest {
 
       for (ArrowBlock rbBlock : arrowReader.getRecordBlocks()) {
         arrowReader.loadRecordBatch(rbBlock);
-        Assert.assertEquals(count, root.getRowCount());
+        assertEquals(count, root.getRowCount());
         for (int i = 0; i < 10; i++) {
-          Assert.assertEquals(Lists.newArrayList(i + 0.1f, i + 10.1f), root.getVector("float-pairs").getObject(i));
-          Assert.assertEquals(i, root.getVector("ints").getObject(i));
+          assertEquals(Collections2.asImmutableList(i + 0.1f, i + 10.1f), root.getVector("float-pairs")
+              .getObject(i));
+          assertEquals(i, root.getVector("ints").getObject(i));
         }
       }
     }
@@ -663,10 +684,11 @@ public class TestArrowFile extends BaseFileTest {
       Schema schema = root.getSchema();
       LOGGER.debug("reading schema: " + schema);
       arrowReader.loadNextBatch();
-      Assert.assertEquals(count, root.getRowCount());
+      assertEquals(count, root.getRowCount());
       for (int i = 0; i < 10; i++) {
-        Assert.assertEquals(Lists.newArrayList(i + 0.1f, i + 10.1f), root.getVector("float-pairs").getObject(i));
-        Assert.assertEquals(i, root.getVector("ints").getObject(i));
+        assertEquals(Collections2.asImmutableList(i + 0.1f, i + 10.1f), root.getVector("float-pairs")
+            .getObject(i));
+        assertEquals(i, root.getVector("ints").getObject(i));
       }
     }
   }
@@ -720,7 +742,8 @@ public class TestArrowFile extends BaseFileTest {
     try (IntVector vector = new IntVector("foo", allocator);) {
       Schema schema = new Schema(Collections.singletonList(vector.getField()), null);
       try (FileOutputStream fileOutputStream = new FileOutputStream(file);
-           VectorSchemaRoot root = new VectorSchemaRoot(schema, Collections.singletonList((FieldVector) vector), vector.getValueCount());
+           VectorSchemaRoot root =
+             new VectorSchemaRoot(schema, Collections.singletonList((FieldVector) vector), vector.getValueCount());
            ArrowFileWriter writer = new ArrowFileWriter(root, null, fileOutputStream.getChannel());) {
         writeBatchData(writer, vector, root);
         numBlocksWritten = writer.getRecordBlocks().size();
@@ -731,7 +754,99 @@ public class TestArrowFile extends BaseFileTest {
          ArrowFileReader reader = new ArrowFileReader(fileInputStream.getChannel(), allocator);) {
       IntVector vector = (IntVector) reader.getVectorSchemaRoot().getFieldVectors().get(0);
       validateBatchData(reader, vector);
-      Assert.assertEquals(numBlocksWritten, reader.getRecordBlocks().size());
+      assertEquals(numBlocksWritten, reader.getRecordBlocks().size());
+    }
+  }
+
+  @Test
+  public void testWriteReadMapVector() throws IOException {
+    File file = new File("target/mytest_map.arrow");
+    ByteArrayOutputStream stream = new ByteArrayOutputStream();
+
+    // write
+    try (BufferAllocator originalVectorAllocator =
+           allocator.newChildAllocator("original vectors", 0, Integer.MAX_VALUE)) {
+
+      try (VectorSchemaRoot root = writeMapData(originalVectorAllocator);
+           FileOutputStream fileOutputStream = new FileOutputStream(file);
+           ArrowFileWriter fileWriter = new ArrowFileWriter(root, null, fileOutputStream.getChannel());
+           ArrowStreamWriter streamWriter = new ArrowStreamWriter(root, null, stream)) {
+        LOGGER.debug("writing schema: " + root.getSchema());
+        fileWriter.start();
+        streamWriter.start();
+        fileWriter.writeBatch();
+        streamWriter.writeBatch();
+        fileWriter.end();
+        streamWriter.end();
+      }
+    }
+
+    // read from file
+    try (BufferAllocator readerAllocator = allocator.newChildAllocator("reader", 0, Integer.MAX_VALUE);
+         FileInputStream fileInputStream = new FileInputStream(file);
+         ArrowFileReader arrowReader = new ArrowFileReader(fileInputStream.getChannel(), readerAllocator)) {
+      VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
+      Schema schema = root.getSchema();
+      LOGGER.debug("reading schema: " + schema);
+      Assert.assertTrue(arrowReader.loadNextBatch());
+      validateMapData(root);
+    }
+
+    // Read from stream
+    try (BufferAllocator readerAllocator = allocator.newChildAllocator("reader", 0, Integer.MAX_VALUE);
+         ByteArrayInputStream input = new ByteArrayInputStream(stream.toByteArray());
+         ArrowStreamReader arrowReader = new ArrowStreamReader(input, readerAllocator)) {
+      VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
+      Schema schema = root.getSchema();
+      LOGGER.debug("reading schema: " + schema);
+      Assert.assertTrue(arrowReader.loadNextBatch());
+      validateMapData(root);
+    }
+  }
+
+  @Test
+  public void testWriteReadListAsMap() throws IOException {
+    File file = new File("target/mytest_list_as_map.arrow");
+    ByteArrayOutputStream stream = new ByteArrayOutputStream();
+
+    // write
+    try (BufferAllocator originalVectorAllocator =
+           allocator.newChildAllocator("original vectors", 0, Integer.MAX_VALUE)) {
+
+      try (VectorSchemaRoot root = writeListAsMapData(originalVectorAllocator);
+           FileOutputStream fileOutputStream = new FileOutputStream(file);
+           ArrowFileWriter fileWriter = new ArrowFileWriter(root, null, fileOutputStream.getChannel());
+           ArrowStreamWriter streamWriter = new ArrowStreamWriter(root, null, stream)) {
+        LOGGER.debug("writing schema: " + root.getSchema());
+        fileWriter.start();
+        streamWriter.start();
+        fileWriter.writeBatch();
+        streamWriter.writeBatch();
+        fileWriter.end();
+        streamWriter.end();
+      }
+    }
+
+    // read from file
+    try (BufferAllocator readerAllocator = allocator.newChildAllocator("reader", 0, Integer.MAX_VALUE);
+         FileInputStream fileInputStream = new FileInputStream(file);
+         ArrowFileReader arrowReader = new ArrowFileReader(fileInputStream.getChannel(), readerAllocator)) {
+      VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
+      Schema schema = root.getSchema();
+      LOGGER.debug("reading schema: " + schema);
+      Assert.assertTrue(arrowReader.loadNextBatch());
+      validateListAsMapData(root);
+    }
+
+    // Read from stream
+    try (BufferAllocator readerAllocator = allocator.newChildAllocator("reader", 0, Integer.MAX_VALUE);
+         ByteArrayInputStream input = new ByteArrayInputStream(stream.toByteArray());
+         ArrowStreamReader arrowReader = new ArrowStreamReader(input, readerAllocator)) {
+      VectorSchemaRoot root = arrowReader.getVectorSchemaRoot();
+      Schema schema = root.getSchema();
+      LOGGER.debug("reading schema: " + schema);
+      Assert.assertTrue(arrowReader.loadNextBatch());
+      validateListAsMapData(root);
     }
   }
 
@@ -756,6 +871,41 @@ public class TestArrowFile extends BaseFileTest {
         arrowWriter.start();
         arrowWriter.writeBatch();
         arrowWriter.end();
+      }
+    }
+  }
+
+  @Test
+  public void testFileStreamHasEos() throws IOException {
+
+    try (VarCharVector vector1 = newVarCharVector("varchar1", allocator)) {
+      vector1.allocateNewSafe();
+      vector1.set(0, "foo".getBytes(StandardCharsets.UTF_8));
+      vector1.set(1, "bar".getBytes(StandardCharsets.UTF_8));
+      vector1.set(3, "baz".getBytes(StandardCharsets.UTF_8));
+      vector1.set(4, "bar".getBytes(StandardCharsets.UTF_8));
+      vector1.set(5, "baz".getBytes(StandardCharsets.UTF_8));
+      vector1.setValueCount(6);
+
+      List<Field> fields = Arrays.asList(vector1.getField());
+      List<FieldVector> vectors = Collections2.asImmutableList(vector1);
+      VectorSchemaRoot root =  new VectorSchemaRoot(fields, vectors, vector1.getValueCount());
+
+      // write data
+      ByteArrayOutputStream out = new ByteArrayOutputStream();
+      ArrowFileWriter writer = new ArrowFileWriter(root, null, newChannel(out));
+      writer.start();
+      writer.writeBatch();
+      writer.end();
+
+      byte[] bytes = out.toByteArray();
+      byte[] bytesWithoutMagic = new byte[bytes.length - 8];
+      System.arraycopy(bytes, 8, bytesWithoutMagic, 0, bytesWithoutMagic.length);
+
+      try (ArrowStreamReader reader = new ArrowStreamReader(new ByteArrayInputStream(bytesWithoutMagic), allocator)) {
+        assertTrue(reader.loadNextBatch());
+        // here will throw exception if read footer instead of eos.
+        assertFalse(reader.loadNextBatch());
       }
     }
   }

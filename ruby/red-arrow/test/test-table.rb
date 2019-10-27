@@ -37,14 +37,15 @@ class TableTest < Test::Unit::TestCase
     ]
     @count_array = Arrow::ChunkedArray.new(count_arrays)
     @visible_array = Arrow::ChunkedArray.new(visible_arrays)
-    @count_column = Arrow::Column.new(@count_field, @count_array)
-    @visible_column = Arrow::Column.new(@visible_field, @visible_array)
-    @table = Arrow::Table.new(schema, [@count_column, @visible_column])
+    @table = Arrow::Table.new(schema, [@count_array, @visible_array])
   end
 
   test("#columns") do
-    assert_equal(["count", "visible"],
-                 @table.columns.collect(&:name))
+    assert_equal([
+                   Arrow::Column.new(@table, 0),
+                   Arrow::Column.new(@table, 1),
+                 ],
+                 @table.columns)
   end
 
   sub_test_case("#slice") do
@@ -74,17 +75,24 @@ class TableTest < Test::Unit::TestCase
     end
 
     test("Integer: positive") do
-      assert_equal(<<-TABLE, @table.slice(2).to_s)
-	count	visible
-0	    4	       
-      TABLE
+      assert_equal({"count" => 128, "visible" => nil},
+                   @table.slice(@table.n_rows - 1).to_h)
     end
 
     test("Integer: negative") do
-      assert_equal(<<-TABLE, @table.slice(-1).to_s)
-	count	visible
-0	  128	       
-      TABLE
+      assert_equal({"count" => 1, "visible" => true},
+                   @table.slice(-@table.n_rows).to_h)
+    end
+
+    test("Integer: out of index") do
+      assert_equal([
+                     nil,
+                     nil,
+                   ],
+                   [
+                     @table.slice(@table.n_rows),
+                     @table.slice(-(@table.n_rows + 1)),
+                   ])
     end
 
     test("Range: positive: include end") do
@@ -145,17 +153,35 @@ class TableTest < Test::Unit::TestCase
         end
       end
 
-      test("too many arguments: with block") do
+      test("too many arguments") do
         message = "wrong number of arguments (given 3, expected 1..2)"
         assert_raise(ArgumentError.new(message)) do
           @table.slice(1, 2, 3)
         end
       end
 
-      test("too many arguments: without block") do
-        message = "wrong number of arguments (given 3, expected 0..2)"
+      test("arguments: with block") do
+        message = "must not specify both arguments and block"
         assert_raise(ArgumentError.new(message)) do
-          @table.slice(1, 2, 3) {}
+          @table.slice(1, 2) {}
+        end
+      end
+
+      test("offset: too small") do
+        n_rows = @table.n_rows
+        offset = -(n_rows + 1)
+        message = "offset is out of range (-#{n_rows + 1},#{n_rows}): #{offset}"
+        assert_raise(ArgumentError.new(message)) do
+          @table.slice(offset, 1)
+        end
+      end
+
+      test("offset: too large") do
+        n_rows = @table.n_rows
+        offset = n_rows
+        message = "offset is out of range (-#{n_rows + 1},#{n_rows}): #{offset}"
+        assert_raise(ArgumentError.new(message)) do
+          @table.slice(offset, 1)
         end
       end
     end
@@ -163,11 +189,18 @@ class TableTest < Test::Unit::TestCase
 
   sub_test_case("#[]") do
     test("[String]") do
-      assert_equal(@count_column, @table["count"])
+      assert_equal(Arrow::Column.new(@table, 0),
+                   @table["count"])
     end
 
     test("[Symbol]") do
-      assert_equal(@visible_column, @table[:visible])
+      assert_equal(Arrow::Column.new(@table, 1),
+                   @table[:visible])
+    end
+
+    test("[Integer]") do
+      assert_equal(Arrow::Column.new(@table, 1),
+                   @table[-1])
     end
   end
 
@@ -254,7 +287,8 @@ class TableTest < Test::Unit::TestCase
   end
 
   test("column name getter") do
-    assert_equal(@visible_column, @table.visible)
+    assert_equal(Arrow::Column.new(@table, 1),
+                 @table.visible)
   end
 
   sub_test_case("#remove_column") do
@@ -395,52 +429,129 @@ class TableTest < Test::Unit::TestCase
   end
 
   sub_test_case("#save and .load") do
-    sub_test_case(":format") do
-      test("default") do
-        file = Tempfile.new(["red-arrow", ".arrow"])
-        @table.save(file.path)
-        assert_equal(@table, Arrow::Table.load(file.path))
+    module SaveLoadFormatTests
+      def test_default
+        output = create_output(".arrow")
+        @table.save(output)
+        assert_equal(@table, Arrow::Table.load(output))
       end
 
-      test(":batch") do
-        file = Tempfile.new(["red-arrow", ".arrow"])
-        @table.save(file.path, :format => :batch)
-        assert_equal(@table, Arrow::Table.load(file.path, :format => :batch))
+      def test_batch
+        output = create_output(".arrow")
+        @table.save(output, format: :batch)
+        assert_equal(@table, Arrow::Table.load(output, format: :batch))
       end
 
-      test(":stream") do
-        file = Tempfile.new(["red-arrow", ".arrow"])
-        @table.save(file.path, :format => :stream)
-        assert_equal(@table, Arrow::Table.load(file.path, :format => :stream))
+      def test_stream
+        output = create_output(".arrow")
+        @table.save(output, format: :stream)
+        assert_equal(@table, Arrow::Table.load(output, format: :stream))
       end
 
-      test(":csv") do
-        file = Tempfile.new(["red-arrow", ".csv"])
-        @table.save(file.path, :format => :csv)
-        assert_equal(@table, Arrow::Table.load(file.path, :format => :csv))
+      def test_csv
+        output = create_output(".csv")
+        @table.save(output, format: :csv)
+        assert_equal(@table,
+                     Arrow::Table.load(output,
+                                       format: :csv,
+                                       schema: @table.schema))
       end
 
-      sub_test_case("load: auto detect") do
-        test(":batch") do
-          file = Tempfile.new(["red-arrow", ".arrow"])
-          @table.save(file.path, :format => :batch)
-          assert_equal(@table, Arrow::Table.load(file.path))
+      def test_csv_gz
+        output = create_output(".csv.gz")
+        @table.save(output,
+                    format: :csv,
+                    compression: :gzip)
+        assert_equal(@table,
+                     Arrow::Table.load(output,
+                                       format: :csv,
+                                       compression: :gzip,
+                                       schema: @table.schema))
+      end
+    end
+
+    sub_test_case("path") do
+      sub_test_case(":format") do
+        include SaveLoadFormatTests
+
+        def create_output(extension)
+          @file = Tempfile.new(["red-arrow", extension])
+          @file.path
         end
 
-        test(":stream") do
-          file = Tempfile.new(["red-arrow", ".arrow"])
-          @table.save(file.path, :format => :stream)
-          assert_equal(@table, Arrow::Table.load(file.path))
+        sub_test_case("save: auto detect") do
+          test("csv") do
+            output = create_output(".csv")
+            @table.save(output)
+            assert_equal(@table,
+                         Arrow::Table.load(output,
+                                           format: :csv,
+                                           schema: @table.schema))
+          end
+
+          test("csv.gz") do
+            output = create_output(".csv.gz")
+            @table.save(output)
+            assert_equal(@table,
+                         Arrow::Table.load(output,
+                                           format: :csv,
+                                           compression: :gzip,
+                                           schema: @table.schema))
+          end
         end
 
-        test(":csv") do
-          path = fixture_path("with-header.csv")
-          assert_equal(<<-TABLE, Arrow::Table.load(path, skip_lines: /^#/).to_s)
+        sub_test_case("load: auto detect") do
+          test("batch") do
+            output = create_output(".arrow")
+            @table.save(output, format: :batch)
+            assert_equal(@table, Arrow::Table.load(output))
+          end
+
+          test("stream") do
+            output = create_output(".arrow")
+            @table.save(output, format: :stream)
+            assert_equal(@table, Arrow::Table.load(output))
+          end
+
+          test("csv") do
+            path = fixture_path("with-header.csv")
+            table = Arrow::Table.load(path, skip_lines: /^\#/)
+            assert_equal(<<-TABLE, table.to_s)
 	name	score
 0	alice	   10
 1	bob 	   29
 2	chris	   -1
-          TABLE
+            TABLE
+          end
+
+          test("csv.gz") do
+            file = Tempfile.new(["red-arrow", ".csv.gz"])
+            file.close
+            Zlib::GzipWriter.open(file.path) do |gz|
+              gz.write(<<-CSV)
+name,score
+alice,10
+bob,29
+chris,-1
+              CSV
+            end
+            assert_equal(<<-TABLE, Arrow::Table.load(file.path).to_s)
+	name	score
+0	alice	   10
+1	bob 	   29
+2	chris	   -1
+            TABLE
+          end
+        end
+      end
+    end
+
+    sub_test_case("Buffer") do
+      sub_test_case(":format") do
+        include SaveLoadFormatTests
+
+        def create_output(extension)
+          Arrow::ResizableBuffer.new(1024)
         end
       end
     end
@@ -460,5 +571,79 @@ class TableTest < Test::Unit::TestCase
 6	   64	       
 7	  128	       
     TABLE
+  end
+
+  sub_test_case("#to_s") do
+    sub_test_case(":format") do
+      def setup
+        columns = {
+          "count" => Arrow::UInt8Array.new([1, 2]),
+          "visible" => Arrow::BooleanArray.new([true, false]),
+        }
+        @table = Arrow::Table.new(columns)
+      end
+
+      test(":column") do
+        assert_equal(<<-TABLE, @table.to_s(format: :column))
+count: uint8
+visible: bool
+----
+count:
+  [
+    [
+      1,
+      2
+    ]
+  ]
+visible:
+  [
+    [
+      true,
+      false
+    ]
+  ]
+        TABLE
+      end
+
+      test(":list") do
+        assert_equal(<<-TABLE, @table.to_s(format: :list))
+==================== 0 ====================
+count: 1
+visible: true
+==================== 1 ====================
+count: 2
+visible: false
+        TABLE
+      end
+
+      test(":table") do
+        assert_equal(<<-TABLE, @table.to_s(format: :table))
+	count	visible
+0	    1	true   
+1	    2	false  
+        TABLE
+      end
+
+      test("invalid") do
+        message = ":format must be :column, :list, :table or nil: <:invalid>"
+        assert_raise(ArgumentError.new(message)) do
+          @table.to_s(format: :invalid)
+        end
+      end
+    end
+
+    sub_test_case("#==") do
+      test("Arrow::Table") do
+        assert do
+          @table == @table
+        end
+      end
+
+      test("not Arrow::Table") do
+        assert do
+          not (@table == 29)
+        end
+      end
+    end
   end
 end

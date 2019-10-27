@@ -17,10 +17,12 @@
 package array
 
 import (
+	"fmt"
+	"strings"
 	"sync/atomic"
 
 	"github.com/apache/arrow/go/arrow"
-	"github.com/apache/arrow/go/arrow/internal/bitutil"
+	"github.com/apache/arrow/go/arrow/bitutil"
 	"github.com/apache/arrow/go/arrow/internal/debug"
 	"github.com/apache/arrow/go/arrow/memory"
 )
@@ -42,11 +44,41 @@ func NewStructData(data *Data) *Struct {
 func (a *Struct) NumField() int         { return len(a.fields) }
 func (a *Struct) Field(i int) Interface { return a.fields[i] }
 
+func (a *Struct) String() string {
+	o := new(strings.Builder)
+	o.WriteString("{")
+	for i, v := range a.fields {
+		if i > 0 {
+			o.WriteString(" ")
+		}
+		fmt.Fprintf(o, "%v", v)
+	}
+	o.WriteString("}")
+	return o.String()
+}
+
 func (a *Struct) setData(data *Data) {
 	a.array.setData(data)
 	a.fields = make([]Interface, len(data.childData))
 	for i, child := range data.childData {
 		a.fields[i] = MakeFromData(child)
+	}
+}
+
+func arrayEqualStruct(left, right *Struct) bool {
+	for i, lf := range left.fields {
+		rf := right.fields[i]
+		if !ArrayEqual(lf, rf) {
+			return false
+		}
+	}
+	return true
+}
+
+func (a *Struct) Retain() {
+	a.array.Retain()
+	for _, f := range a.fields {
+		f.Retain()
 	}
 }
 

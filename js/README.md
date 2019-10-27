@@ -35,14 +35,21 @@ Arrow is a set of technologies that enable big data systems to process and trans
 
 [Apache Arrow](https://github.com/apache/arrow) is a columnar memory layout specification for encoding vectors and table-like containers of flat and nested data. The Arrow spec aligns columnar data in memory to minimize cache misses and take advantage of the latest SIMD (Single input multiple data) and GPU operations on modern processors.
 
-Apache Arrow is the emerging standard for large in-memory columnar data ([Spark](https://spark.apache.org/), [Pandas](http://wesmckinney.com/blog/pandas-and-apache-arrow/), [Drill](https://drill.apache.org/), [Graphistry](https://www.graphistry.com), ...). By standardizing on a common binary interchange format, big data systems can reduce the costs and friction associated with cross-system communication.
+Apache Arrow is the emerging standard for large in-memory columnar data ([Spark](https://spark.apache.org/), [Pandas](https://wesmckinney.com/blog/pandas-and-apache-arrow/), [Drill](https://drill.apache.org/), [Graphistry](https://www.graphistry.com), ...). By standardizing on a common binary interchange format, big data systems can reduce the costs and friction associated with cross-system communication.
 
-# Usage
+# Get Started
 
+Check out our [API documentation][7] to learn more about how to use Apache Arrow's JS implementation. You can also learn by example by checking out some of the following resources:
 
-## Get a table from an Arrow file on disk (in IPC format)
+* [Observable: Introduction to Apache Arrow][5]
+* [Observable: Manipulating flat arrays arrow-style][6]
+* [/js/test/unit](https://github.com/apache/arrow/tree/master/js/test/unit) - Unit tests for Table and Vector
 
-```es6
+## Cookbook
+
+### Get a table from an Arrow file on disk (in IPC format)
+
+```js
 import { readFileSync } from 'fs';
 import { Table } from 'apache-arrow';
 
@@ -61,9 +68,9 @@ null, null, null
 */
 ```
 
-## Create a Table when the Arrow file is split across buffers
+### Create a Table when the Arrow file is split across buffers
 
-```es6
+```js
 import { readFileSync } from 'fs';
 import { Table } from 'apache-arrow';
 
@@ -84,47 +91,44 @@ console.log(table.toString());
 */
 ```
 
-## Create a Table from JavaScript arrays
+### Create a Table from JavaScript arrays
 
-```es6
-const fields = [{
-        name: 'precipitation',
-        type: { name: 'floatingpoint', precision: 'SINGLE'},
-        nullable: false, children: []
-    }, {
-        name: 'date',
-        type: { name: 'date', unit: 'MILLISECOND' },
-        nullable: false, children: []
-    }];
-const rainAmounts = Array.from({length: LENGTH}, () => Number((Math.random() * 20).toFixed(1)));
-const rainDates = Array.from({length: LENGTH}, (_, i) => Date.now() - 1000 * 60 * 60 * 24 * i);
+```js
+import {
+  Table,
+  FloatVector,
+  DateVector
+} from 'apache-arrow';
 
 const LENGTH = 2000;
-const rainfall = arrow.Table.from({
-  schema: { fields: fields },
-  batches: [{
-    count: LENGTH,
-    columns: [
-      {name: "precipitation", count: LENGTH, VALIDITY: [], DATA: rainAmounts },
-      {name: "date",          count: LENGTH, VALIDITY: [], DATA: rainDates } ] }] })
+
+const rainAmounts = Float32Array.from(
+  { length: LENGTH },
+  () => Number((Math.random() * 20).toFixed(1)));
+
+const rainDates = Array.from(
+  { length: LENGTH },
+  (_, i) => new Date(Date.now() - 1000 * 60 * 60 * 24 * i));
+
+const rainfall = Table.new(
+  [FloatVector.from(rainAmounts), DateVector.from(rainDates)],
+  ['precipitation', 'date']
+);
 ```
 
-## Load data with `fetch`
+### Load data with `fetch`
 
-```es6
+```js
 import { Table } from "apache-arrow";
 
-fetch(require("simple.arrow")).then(response => {
-  response.arrayBuffer().then(buffer => {
-    const table = Table.from(new Uint8Array(buffer));
-    console.log(table.toString());
-  });
-});
+const table = await Table.from(fetch(("/simple.arrow")));
+console.log(table.toString());
+
 ```
 
-## Columns look like JS Arrays
+### Columns look like JS Arrays
 
-```es6
+```js
 import { readFileSync } from 'fs';
 import { Table } from 'apache-arrow';
 
@@ -136,7 +140,7 @@ const table = Table.from([
 const column = table.getColumn('origin_lat');
 
 // Copy the data into a TypedArray
-const typed = column.slice();
+const typed = column.toArray();
 assert(typed instanceof Float32Array);
 
 for (let i = -1, n = column.length; ++i < n;) {
@@ -144,9 +148,9 @@ for (let i = -1, n = column.length; ++i < n;) {
 }
 ```
 
-## Usage with MapD Core
+### Usage with MapD Core
 
-```es6
+```js
 import MapD from 'rxjs-mapd';
 import { Table } from 'apache-arrow';
 
@@ -169,7 +173,7 @@ MapD.open(host, port)
   )
   .map(([schema, records]) =>
     // Create Arrow Table from results
-    Table.from(schema, records))
+    Table.from([schema, records]))
   .map((table) =>
     // Stringify the table to CSV with row numbers
     table.toString({ index: true }))
@@ -185,15 +189,9 @@ Index,   origin_city
 */
 ```
 
-# Tutorials and examples
-
-* [JavaScript Introduction to Arrow][5]
-* [Manipulating flat arrays arrow-style][6]
-* [/js/test/unit](https://github.com/apache/arrow/tree/master/js/test/unit) - Unit tests for Table and Vector
-
 # Getting involved
 
-See [develop.md](https://github.com/apache/arrow/blob/master/develop.md)
+See [DEVELOP.md](DEVELOP.md)
 
 Even if you do not plan to contribute to Apache Arrow itself or Arrow
 integrations in other projects, we'd be happy to have you involved:
@@ -209,12 +207,12 @@ We prefer to receive contributions in the form of GitHub pull requests. Please s
 
 If you are looking for some ideas on what to contribute, check out the [JIRA
 issues][3] for the Apache Arrow project. Comment on the issue and/or contact
-[dev@arrow.apache.org](http://mail-archives.apache.org/mod_mbox/arrow-dev/)
+[dev@arrow.apache.org](https://mail-archives.apache.org/mod_mbox/arrow-dev/)
 with your questions and ideas.
 
 If you’d like to report a bug but don’t have time to fix it, you can still post
 it on JIRA, or email the mailing list
-[dev@arrow.apache.org](http://mail-archives.apache.org/mod_mbox/arrow-dev/)
+[dev@arrow.apache.org](https://mail-archives.apache.org/mod_mbox/arrow-dev/)
 
 ## Packaging
 
@@ -253,18 +251,19 @@ Full list of broader Apache Arrow [committers](https://arrow.apache.org/committe
 
 # Powered By Apache Arrow in JS
 
-Full list of broader Apache Arrow [projects & organizations](https://github.com/apache/arrow/blob/master/site/powered_by.md).
+Full list of broader Apache Arrow [projects & organizations](https://arrow.apache.org/powered_by/).
 
 ## Open Source Projects
 
 * [Apache Arrow](https://arrow.apache.org) -- Parent project for Powering Columnar In-Memory Analytics, including affiliated open source projects
 * [rxjs-mapd](https://github.com/graphistry/rxjs-mapd) -- A MapD Core node-driver that returns query results as Arrow columns
 * [Perspective](https://github.com/jpmorganchase/perspective) -- Perspective is a streaming data visualization engine by J.P. Morgan for JavaScript for building real-time & user-configurable analytics entirely in the browser.
+* [Falcon](https://github.com/uwdata/falcon) is a visualization tool for linked interactions across multiple aggregate visualizations of millions or billions of records.
 
 ## Companies & Organizations
 
-* [CCRi](http://www.ccri.com/) -- Commonwealth Computer Research Inc, or CCRi, is a Central Virginia based data science and software engineering company
-* [GOAI](http://gpuopenanalytics.com/) -- GPU Open Analytics Initiative standardizes on Arrow as part of creating common data frameworks that enable developers and statistical researchers to accelerate data science on GPUs
+* [CCRi](https://www.ccri.com/) -- Commonwealth Computer Research Inc, or CCRi, is a Central Virginia based data science and software engineering company
+* [GOAI](https://gpuopenanalytics.com/) -- GPU Open Analytics Initiative standardizes on Arrow as part of creating common data frameworks that enable developers and statistical researchers to accelerate data science on GPUs
 * [Graphistry, Inc.](https://www.graphistry.com/) - An end-to-end GPU accelerated visual investigation platform used by teams for security, anti-fraud, and related investigations. Graphistry uses Arrow in its NodeJS GPU backend and client libraries, and is an early contributing member to GOAI and Arrow\[JS\] working to bring these technologies to the enterprise.
 
 # License
@@ -277,3 +276,4 @@ Full list of broader Apache Arrow [projects & organizations](https://github.com/
 [4]: https://github.com/apache/arrow
 [5]: https://beta.observablehq.com/@theneuralbit/introduction-to-apache-arrow
 [6]: https://beta.observablehq.com/@lmeyerov/manipulating-flat-arrays-arrow-style
+[7]: https://arrow.apache.org/docs/js/

@@ -1,25 +1,48 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package org.apache.arrow.adapter.jdbc.h2;
 
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.assertBigIntVectorValues;
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.assertBitVectorValues;
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.assertBooleanVectorValues;
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.assertDateVectorValues;
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.assertDecimalVectorValues;
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.assertFloat4VectorValues;
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.assertFloat8VectorValues;
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.assertIntVectorValues;
 import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.assertNullValues;
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.assertSmallIntVectorValues;
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.assertTimeStampVectorValues;
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.assertTimeVectorValues;
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.assertTinyIntVectorValues;
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.assertVarBinaryVectorValues;
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.assertVarcharVectorValues;
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.getBinaryValues;
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.getBooleanValues;
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.getCharArray;
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.getDecimalValues;
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.getDoubleValues;
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.getFloatValues;
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.getIntValues;
+import static org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper.getLongValues;
 
 import java.io.IOException;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.util.Arrays;
 import java.util.Calendar;
@@ -27,6 +50,10 @@ import java.util.Collection;
 
 import org.apache.arrow.adapter.jdbc.AbstractJdbcToArrowTest;
 import org.apache.arrow.adapter.jdbc.JdbcToArrow;
+import org.apache.arrow.adapter.jdbc.JdbcToArrowConfig;
+import org.apache.arrow.adapter.jdbc.JdbcToArrowConfigBuilder;
+import org.apache.arrow.adapter.jdbc.JdbcToArrowTestHelper;
+import org.apache.arrow.adapter.jdbc.JdbcToArrowUtils;
 import org.apache.arrow.adapter.jdbc.Table;
 import org.apache.arrow.memory.RootAllocator;
 import org.apache.arrow.vector.BigIntVector;
@@ -43,41 +70,45 @@ import org.apache.arrow.vector.TinyIntVector;
 import org.apache.arrow.vector.VarBinaryVector;
 import org.apache.arrow.vector.VarCharVector;
 import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
 
 /**
- * JUnit Test Class which contains methods to test JDBC to Arrow data conversion functionality with null values for H2 database
+ * JUnit Test Class which contains methods to test JDBC to Arrow data conversion functionality with null values for
+ * H2 database.
  */
 @RunWith(Parameterized.class)
 public class JdbcToArrowNullTest extends AbstractJdbcToArrowTest {
 
   private static final String NULL = "null";
+  private static final String SELECTED_NULL_ROW = "selected_null_row";
   private static final String SELECTED_NULL_COLUMN = "selected_null_column";
 
   private static final String[] testFiles = {
-          "h2/test1_all_datatypes_null_h2.yml",
-          "h2/test1_selected_datatypes_null_h2.yml"
+    "h2/test1_all_datatypes_null_h2.yml",
+    "h2/test1_selected_datatypes_null_h2.yml",
+    "h2/test1_all_datatypes_selected_null_rows_h2.yml"
   };
 
   /**
-   * Constructor which populate table object for each test iteration
+   * Constructor which populate table object for each test iteration.
    *
-   * @param table
+   * @param table Table object
    */
   public JdbcToArrowNullTest(Table table) {
     this.table = table;
   }
 
   /**
-   * This method returns collection of Table object for each test iteration
+   * Get the test data as a collection of Table objects for each test iteration.
    *
-   * @return
-   * @throws SQLException
-   * @throws ClassNotFoundException
-   * @throws IOException
+   * @return Collection of Table objects
+   * @throws SQLException on error
+   * @throws ClassNotFoundException on error
+   * @throws IOException on error
    */
   @Parameters
   public static Collection<Object[]> getTestData() throws SQLException, ClassNotFoundException, IOException {
@@ -85,26 +116,44 @@ public class JdbcToArrowNullTest extends AbstractJdbcToArrowTest {
   }
 
   /**
-   * Test Method to test JdbcToArrow Functionality for various H2 DB based datatypes with null values
+   * Test Method to test JdbcToArrow Functionality for various H2 DB based datatypes with null values.
    */
   @Test
-  public void testJdbcToArroValues() throws SQLException, IOException {
-    testDataSets(JdbcToArrow.sqlToArrow(conn, table.getQuery(), new RootAllocator(Integer.MAX_VALUE), Calendar.getInstance()));
+  public void testJdbcToArrowValues() throws SQLException, IOException {
+    testDataSets(JdbcToArrow.sqlToArrow(conn, table.getQuery(), new RootAllocator(Integer.MAX_VALUE),
+        Calendar.getInstance()));
     testDataSets(JdbcToArrow.sqlToArrow(conn, table.getQuery(), new RootAllocator(Integer.MAX_VALUE)));
-    testDataSets(JdbcToArrow.sqlToArrow(conn.createStatement().executeQuery(table.getQuery()), new RootAllocator(Integer.MAX_VALUE),
-            Calendar.getInstance()));
+    testDataSets(JdbcToArrow.sqlToArrow(conn.createStatement().executeQuery(table.getQuery()),
+        new RootAllocator(Integer.MAX_VALUE), Calendar.getInstance()));
     testDataSets(JdbcToArrow.sqlToArrow(conn.createStatement().executeQuery(table.getQuery())));
-    testDataSets(JdbcToArrow.sqlToArrow(conn.createStatement().executeQuery(table.getQuery()), new RootAllocator(Integer.MAX_VALUE)));
+    testDataSets(JdbcToArrow.sqlToArrow(conn.createStatement().executeQuery(table.getQuery()),
+        new RootAllocator(Integer.MAX_VALUE)));
     testDataSets(JdbcToArrow.sqlToArrow(conn.createStatement().executeQuery(table.getQuery()), Calendar.getInstance()));
+    testDataSets(JdbcToArrow.sqlToArrow(
+        conn.createStatement().executeQuery(table.getQuery()),
+        new JdbcToArrowConfigBuilder(new RootAllocator(Integer.MAX_VALUE), Calendar.getInstance()).build()));
+    testDataSets(JdbcToArrow.sqlToArrow(
+        conn,
+        table.getQuery(),
+        new JdbcToArrowConfigBuilder(new RootAllocator(Integer.MAX_VALUE), Calendar.getInstance()).build()));
   }
 
+  @Test
+  public void testJdbcSchemaMetadata() throws SQLException {
+    JdbcToArrowConfig config = new JdbcToArrowConfigBuilder(new RootAllocator(0), Calendar.getInstance(), true).build();
+    ResultSetMetaData rsmd = conn.createStatement().executeQuery(table.getQuery()).getMetaData();
+    Schema schema = JdbcToArrowUtils.jdbcToArrowSchema(rsmd, config);
+    JdbcToArrowTestHelper.assertFieldMetadataMatchesResultSetMetadata(rsmd, schema);
+  }
 
   /**
-   * This method calls the assert methods for various DataSets
+   * This method calls the assert methods for various DataSets.
    *
-   * @param root
+   * @param root VectorSchemaRoot for test
    */
   public void testDataSets(VectorSchemaRoot root) {
+    JdbcToArrowTestHelper.assertFieldMetadataIsEmpty(root);
+
     switch (table.getType()) {
       case NULL:
         sqlToArrowTestNullValues(table.getVectors(), root, table.getRowCount());
@@ -112,15 +161,76 @@ public class JdbcToArrowNullTest extends AbstractJdbcToArrowTest {
       case SELECTED_NULL_COLUMN:
         sqlToArrowTestSelectedNullColumnsValues(table.getVectors(), root, table.getRowCount());
         break;
+      case SELECTED_NULL_ROW:
+        testAllVectorValues(root);
+        break;
+      default:
+        // do nothing
+        break;
     }
   }
 
+  private void testAllVectorValues(VectorSchemaRoot root) {
+    JdbcToArrowTestHelper.assertFieldMetadataIsEmpty(root);
+
+    assertBigIntVectorValues((BigIntVector) root.getVector(BIGINT), table.getRowCount(),
+        getLongValues(table.getValues(), BIGINT));
+
+    assertTinyIntVectorValues((TinyIntVector) root.getVector(TINYINT), table.getRowCount(),
+        getIntValues(table.getValues(), TINYINT));
+
+    assertSmallIntVectorValues((SmallIntVector) root.getVector(SMALLINT), table.getRowCount(),
+        getIntValues(table.getValues(), SMALLINT));
+
+    assertVarBinaryVectorValues((VarBinaryVector) root.getVector(BINARY), table.getRowCount(),
+        getBinaryValues(table.getValues(), BINARY));
+
+    assertVarBinaryVectorValues((VarBinaryVector) root.getVector(BLOB), table.getRowCount(),
+        getBinaryValues(table.getValues(), BLOB));
+
+    assertVarcharVectorValues((VarCharVector) root.getVector(CLOB), table.getRowCount(),
+        getCharArray(table.getValues(), CLOB));
+
+    assertVarcharVectorValues((VarCharVector) root.getVector(VARCHAR), table.getRowCount(),
+        getCharArray(table.getValues(), VARCHAR));
+
+    assertVarcharVectorValues((VarCharVector) root.getVector(CHAR), table.getRowCount(),
+        getCharArray(table.getValues(), CHAR));
+
+    assertIntVectorValues((IntVector) root.getVector(INT), table.getRowCount(),
+        getIntValues(table.getValues(), INT));
+
+    assertBitVectorValues((BitVector) root.getVector(BIT), table.getRowCount(),
+        getIntValues(table.getValues(), BIT));
+
+    assertBooleanVectorValues((BitVector) root.getVector(BOOL), table.getRowCount(),
+        getBooleanValues(table.getValues(), BOOL));
+
+    assertDateVectorValues((DateMilliVector) root.getVector(DATE), table.getRowCount(),
+        getLongValues(table.getValues(), DATE));
+
+    assertTimeVectorValues((TimeMilliVector) root.getVector(TIME), table.getRowCount(),
+        getLongValues(table.getValues(), TIME));
+
+    assertTimeStampVectorValues((TimeStampVector) root.getVector(TIMESTAMP), table.getRowCount(),
+        getLongValues(table.getValues(), TIMESTAMP));
+
+    assertDecimalVectorValues((DecimalVector) root.getVector(DECIMAL), table.getRowCount(),
+        getDecimalValues(table.getValues(), DECIMAL));
+
+    assertFloat8VectorValues((Float8Vector) root.getVector(DOUBLE), table.getRowCount(),
+        getDoubleValues(table.getValues(), DOUBLE));
+
+    assertFloat4VectorValues((Float4Vector) root.getVector(REAL), table.getRowCount(),
+        getFloatValues(table.getValues(), REAL));
+  }
+
   /**
-   * This method assert tests null values in vectors for all the datatypes
+   * This method assert tests null values in vectors for all the datatypes.
    *
-   * @param vectors
-   * @param root
-   * @param rowCount
+   * @param vectors Vectors to test
+   * @param root VectorSchemaRoot for test
+   * @param rowCount number of rows
    */
   public void sqlToArrowTestNullValues(String[] vectors, VectorSchemaRoot root, int rowCount) {
     assertNullValues((IntVector) root.getVector(vectors[0]), rowCount);
@@ -143,11 +253,11 @@ public class JdbcToArrowNullTest extends AbstractJdbcToArrowTest {
   }
 
   /**
-   * This method assert tests null values in vectors for some selected datatypes
+   * This method assert tests null values in vectors for some selected datatypes.
    *
-   * @param vectors
-   * @param root
-   * @param rowCount
+   * @param vectors Vectors to test
+   * @param root VectorSchemaRoot for test
+   * @param rowCount number of rows
    */
   public void sqlToArrowTestSelectedNullColumnsValues(String[] vectors, VectorSchemaRoot root, int rowCount) {
     assertNullValues((BigIntVector) root.getVector(vectors[0]), rowCount);

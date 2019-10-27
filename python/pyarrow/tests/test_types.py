@@ -16,12 +16,16 @@
 # under the License.
 
 from collections import OrderedDict
+
 import pickle
-
 import pytest
+import hypothesis as h
+import hypothesis.strategies as st
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.types as types
+import pyarrow.tests.strategies as past
 
 
 def get_many_types():
@@ -38,6 +42,7 @@ def get_many_types():
         pa.timestamp('us'),
         pa.timestamp('us', tz='UTC'),
         pa.timestamp('us', tz='Europe/Paris'),
+        pa.duration('s'),
         pa.float16(),
         pa.float32(),
         pa.float64(),
@@ -45,7 +50,10 @@ def get_many_types():
         pa.string(),
         pa.binary(),
         pa.binary(10),
+        pa.large_string(),
+        pa.large_binary(),
         pa.list_(pa.int32()),
+        pa.large_list(pa.uint16()),
         pa.struct([pa.field('a', pa.int32()),
                    pa.field('b', pa.int8()),
                    pa.field('c', pa.string())]),
@@ -58,7 +66,7 @@ def get_many_types():
                   pa.field('b', pa.string())], mode=pa.lib.UnionMode_SPARSE),
         pa.union([pa.field('a', pa.binary(10), nullable=False),
                   pa.field('b', pa.string())], mode=pa.lib.UnionMode_SPARSE),
-        pa.dictionary(pa.int32(), pa.array(['a', 'b', 'c']))
+        pa.dictionary(pa.int32(), pa.string())
     )
 
 
@@ -104,14 +112,19 @@ def test_is_decimal():
 
 
 def test_is_list():
-    assert types.is_list(pa.list_(pa.int32()))
+    a = pa.list_(pa.int32())
+    b = pa.large_list(pa.int32())
+
+    assert types.is_list(a)
+    assert not types.is_large_list(a)
+    assert types.is_large_list(b)
+    assert not types.is_list(b)
+
     assert not types.is_list(pa.int32())
 
 
 def test_is_dictionary():
-    assert types.is_dictionary(
-        pa.dictionary(pa.int32(),
-                      pa.array(['a', 'b', 'c'])))
+    assert types.is_dictionary(pa.dictionary(pa.int32(), pa.string()))
     assert not types.is_dictionary(pa.int32())
 
 
@@ -125,6 +138,7 @@ def test_is_nested_or_struct():
 
     assert types.is_nested(struct_ex)
     assert types.is_nested(pa.list_(pa.int32()))
+    assert types.is_nested(pa.large_list(pa.int32()))
     assert not types.is_nested(pa.int32())
 
 
@@ -143,10 +157,24 @@ def test_is_union():
 def test_is_binary_string():
     assert types.is_binary(pa.binary())
     assert not types.is_binary(pa.string())
+    assert not types.is_binary(pa.large_binary())
+    assert not types.is_binary(pa.large_string())
 
     assert types.is_string(pa.string())
     assert types.is_unicode(pa.string())
     assert not types.is_string(pa.binary())
+    assert not types.is_string(pa.large_string())
+    assert not types.is_string(pa.large_binary())
+
+    assert types.is_large_binary(pa.large_binary())
+    assert not types.is_large_binary(pa.large_string())
+    assert not types.is_large_binary(pa.binary())
+    assert not types.is_large_binary(pa.string())
+
+    assert types.is_large_string(pa.large_string())
+    assert not types.is_large_string(pa.large_binary())
+    assert not types.is_large_string(pa.string())
+    assert not types.is_large_string(pa.binary())
 
     assert types.is_fixed_size_binary(pa.binary(5))
     assert not types.is_fixed_size_binary(pa.binary())
@@ -156,24 +184,34 @@ def test_is_temporal_date_time_timestamp():
     date_types = [pa.date32(), pa.date64()]
     time_types = [pa.time32('s'), pa.time64('ns')]
     timestamp_types = [pa.timestamp('ms')]
+    duration_types = [pa.duration('ms')]
 
-    for case in date_types + time_types + timestamp_types:
+    for case in date_types + time_types + timestamp_types + duration_types:
         assert types.is_temporal(case)
 
     for case in date_types:
         assert types.is_date(case)
         assert not types.is_time(case)
         assert not types.is_timestamp(case)
+        assert not types.is_duration(case)
 
     for case in time_types:
         assert types.is_time(case)
         assert not types.is_date(case)
         assert not types.is_timestamp(case)
+        assert not types.is_duration(case)
 
     for case in timestamp_types:
         assert types.is_timestamp(case)
         assert not types.is_date(case)
         assert not types.is_time(case)
+        assert not types.is_duration(case)
+
+    for case in duration_types:
+        assert types.is_duration(case)
+        assert not types.is_date(case)
+        assert not types.is_time(case)
+        assert not types.is_timestamp(case)
 
     assert not types.is_temporal(pa.int32())
 
@@ -217,19 +255,64 @@ def test_time64_units():
             pa.time64(invalid_unit)
 
 
+def test_duration():
+    for unit in ('s', 'ms', 'us', 'ns'):
+        ty = pa.duration(unit)
+        assert ty.unit == unit
+
+    for invalid_unit in ('m', 'arbit', 'rary'):
+        with pytest.raises(ValueError, match='Invalid TimeUnit string'):
+            pa.duration(invalid_unit)
+
+
 def test_list_type():
     ty = pa.list_(pa.int64())
+    assert isinstance(ty, pa.ListType)
     assert ty.value_type == pa.int64()
+
+    with pytest.raises(TypeError):
+        pa.list_(None)
+
+
+def test_large_list_type():
+    ty = pa.large_list(pa.utf8())
+    assert isinstance(ty, pa.LargeListType)
+    assert ty.value_type == pa.utf8()
+
+    with pytest.raises(TypeError):
+        pa.large_list(None)
 
 
 def test_struct_type():
-    fields = [pa.field('a', pa.int64()),
-              pa.field('a', pa.int32()),
-              pa.field('b', pa.int32())]
+    fields = [
+        # Duplicate field name on purpose
+        pa.field('a', pa.int64()),
+        pa.field('a', pa.int32()),
+        pa.field('b', pa.int32())
+    ]
     ty = pa.struct(fields)
 
     assert len(ty) == ty.num_children == 3
     assert list(ty) == fields
+    assert ty[0].name == 'a'
+    assert ty[2].type == pa.int32()
+    with pytest.raises(IndexError):
+        assert ty[3]
+
+    assert ty['b'] == ty[2]
+
+    # Duplicate
+    with pytest.warns(UserWarning):
+        with pytest.raises(KeyError):
+            ty['a']
+
+    # Not found
+    with pytest.raises(KeyError):
+        ty['c']
+
+    # Neither integer nor string
+    with pytest.raises(TypeError):
+        ty[None]
 
     for a, b in zip(ty, fields):
         a == b
@@ -251,6 +334,10 @@ def test_struct_type():
     for a, b in zip(ty, fields):
         a == b
 
+    # Invalid args
+    with pytest.raises(TypeError):
+        pa.struct([('a', None)])
+
 
 def test_union_type():
     def check_fields(ty, fields):
@@ -263,27 +350,51 @@ def test_union_type():
         ty = pa.union(fields, mode=mode)
         assert ty.mode == 'sparse'
         check_fields(ty, fields)
+        assert ty.type_codes == [0, 1]
     for mode in ('dense', pa.lib.UnionMode_DENSE):
         ty = pa.union(fields, mode=mode)
         assert ty.mode == 'dense'
         check_fields(ty, fields)
+        assert ty.type_codes == [0, 1]
     for mode in ('unknown', 2):
         with pytest.raises(ValueError, match='Invalid union mode'):
             pa.union(fields, mode=mode)
 
 
 def test_dictionary_type():
-    ty0 = pa.dictionary(pa.int32(), pa.array(['a', 'b', 'c']))
+    ty0 = pa.dictionary(pa.int32(), pa.string())
     assert ty0.index_type == pa.int32()
-    assert isinstance(ty0.dictionary, pa.Array)
-    assert ty0.dictionary.to_pylist() == ['a', 'b', 'c']
+    assert ty0.value_type == pa.string()
     assert ty0.ordered is False
 
-    ty1 = pa.dictionary(pa.float32(), pa.array([1.0, 2.0]), ordered=True)
-    assert ty1.index_type == pa.float32()
-    assert isinstance(ty0.dictionary, pa.Array)
-    assert ty1.dictionary.to_pylist() == [1.0, 2.0]
+    ty1 = pa.dictionary(pa.int8(), pa.float64(), ordered=True)
+    assert ty1.index_type == pa.int8()
+    assert ty1.value_type == pa.float64()
     assert ty1.ordered is True
+
+    # construct from non-arrow objects
+    ty2 = pa.dictionary('int8', 'string')
+    assert ty2.index_type == pa.int8()
+    assert ty2.value_type == pa.string()
+    assert ty2.ordered is False
+
+    # invalid index type raises
+    with pytest.raises(TypeError):
+        pa.dictionary(pa.string(), pa.int64())
+    with pytest.raises(TypeError):
+        pa.dictionary(pa.uint32(), pa.string())
+
+
+def test_dictionary_ordered_equals():
+    # Python side checking of ARROW-6345
+    d1 = pa.dictionary('int32', 'binary', ordered=True)
+    d2 = pa.dictionary('int32', 'binary', ordered=False)
+    d3 = pa.dictionary('int8', 'binary', ordered=True)
+    d4 = pa.dictionary('int32', 'binary', ordered=True)
+
+    assert not d1.equals(d2)
+    assert not d1.equals(d3)
+    assert d1.equals(d4)
 
 
 def test_types_hashable():
@@ -369,6 +480,14 @@ def test_decimal_properties():
     assert ty.scale == 4
 
 
+def test_decimal_overflow():
+    pa.decimal128(1, 0)
+    pa.decimal128(38, 0)
+    for i in (0, -1, 39):
+        with pytest.raises(ValueError):
+            pa.decimal128(39, 0)
+
+
 def test_type_equality_operators():
     many_types = get_many_types()
     non_pyarrow = ('foo', 16, {'s', 'e', 't'})
@@ -394,6 +513,9 @@ def test_field_basic():
 
     f = pa.field('foo', t, False)
     assert not f.nullable
+
+    with pytest.raises(TypeError):
+        pa.field('foo', None)
 
 
 def test_field_equals():
@@ -442,14 +564,26 @@ def test_field_metadata():
 
 
 def test_field_add_remove_metadata():
+    import collections
+
     f0 = pa.field('foo', pa.int32())
 
     assert f0.metadata is None
 
     metadata = {b'foo': b'bar', b'pandas': b'badger'}
+    metadata2 = collections.OrderedDict([
+        (b'a', b'alpha'),
+        (b'b', b'beta')
+    ])
 
-    f1 = f0.add_metadata(metadata)
+    f1 = f0.with_metadata(metadata)
     assert f1.metadata == metadata
+
+    f2 = f0.with_metadata(metadata2)
+    assert f2.metadata == metadata2
+
+    with pytest.raises(TypeError):
+        f0.with_metadata([1, 2, 3])
 
     f3 = f1.remove_metadata()
     assert f3.metadata is None
@@ -459,5 +593,61 @@ def test_field_add_remove_metadata():
     assert f4.metadata is None
 
     f5 = pa.field('foo', pa.int32(), True, metadata)
-    f6 = f0.add_metadata(metadata)
+    f6 = f0.with_metadata(metadata)
     assert f5.equals(f6)
+
+
+def test_is_integer_value():
+    assert pa.types.is_integer_value(1)
+    assert pa.types.is_integer_value(np.int64(1))
+    assert not pa.types.is_integer_value('1')
+
+
+def test_is_float_value():
+    assert not pa.types.is_float_value(1)
+    assert pa.types.is_float_value(1.)
+    assert pa.types.is_float_value(np.float64(1))
+    assert not pa.types.is_float_value('1.0')
+
+
+def test_is_boolean_value():
+    assert not pa.types.is_boolean_value(1)
+    assert pa.types.is_boolean_value(True)
+    assert pa.types.is_boolean_value(False)
+    assert pa.types.is_boolean_value(np.bool_(True))
+    assert pa.types.is_boolean_value(np.bool_(False))
+
+
+@h.given(
+    past.all_types |
+    past.all_fields |
+    past.all_schemas
+)
+@h.example(
+    pa.field(name='', type=pa.null(), metadata={'0': '', '': ''})
+)
+def test_pickling(field):
+    data = pickle.dumps(field)
+    assert pickle.loads(data) == field
+
+
+@h.given(
+    st.lists(past.all_types) |
+    st.lists(past.all_fields) |
+    st.lists(past.all_schemas)
+)
+def test_hashing(items):
+    h.assume(
+        # well, this is still O(n^2), but makes the input unique
+        all(not a.equals(b) for i, a in enumerate(items) for b in items[:i])
+    )
+
+    container = {}
+    for i, item in enumerate(items):
+        assert hash(item) == hash(item)
+        container[item] = i
+
+    assert len(container) == len(items)
+
+    for i, item in enumerate(items):
+        assert container[item] == i

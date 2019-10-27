@@ -20,14 +20,13 @@ FROM centos:6
 ARG DEBUG
 
 ENV \
-  SRPM_DOWNLOAD_URL=http://vault.centos.org/7.4.1708/os/Source/SPackages \
+  SRPM_DOWNLOAD_URL=http://vault.centos.org/7.6.1810/os/Source/SPackages \
   LIBARCHIVE_SRPM_BASE=libarchive-3.1.2-10.el7_2.src.rpm
 
 RUN \
   quiet=$([ "${DEBUG}" = "yes" ] || echo "--quiet") && \
   yum update -y ${quiet} && \
   yum install -y ${quiet} \
-    centos-release-scl \
     epel-release && \
   yum install -y \
     autoconf268 \
@@ -44,19 +43,24 @@ RUN \
   yum install -y ${quiet} ~/rpmbuild/RPMS/*/libarchive-3.*.rpm && \
   rm -rf ${LIBARCHIVE_SRPM_BASE} ~/rpmbuild/ && \
   yum install -y ${quiet} \
-    boost-devel \
-    centos-release-scl \
+    centos-release-scl && \
+  yum install -y ${quiet} \
     cmake3 \
+    bzip2-devel \
     devtoolset-6 \
+    gflags-devel \
     git \
     gobject-introspection-devel \
     gtk-doc \
-    jemalloc-devel \
+    libzstd-devel \
+    lz4-devel \
     pkg-config \
     python34 \
     python34-devel \
     python34-numpy \
     rpm-build \
     rpmdevtools \
-    tar && \
+    snappy-devel \
+    tar \
+    zlib-devel && \
   yum clean ${quiet} all

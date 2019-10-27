@@ -1,14 +1,13 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -18,27 +17,31 @@
 
 package org.apache.arrow.vector;
 
+import java.time.LocalDateTime;
+
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.complex.impl.TimeStampMilliReaderImpl;
 import org.apache.arrow.vector.complex.reader.FieldReader;
-import org.apache.arrow.vector.holders.TimeStampMilliHolder;
 import org.apache.arrow.vector.holders.NullableTimeStampMilliHolder;
+import org.apache.arrow.vector.holders.TimeStampMilliHolder;
 import org.apache.arrow.vector.types.Types.MinorType;
+import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
+import org.apache.arrow.vector.util.DateUtility;
 import org.apache.arrow.vector.util.TransferPair;
-import org.joda.time.LocalDateTime;
 
 /**
  * TimeStampMilliVector implements a fixed width vector (8 bytes) of
  * timestamp (millisecond resolution) values which could be null. A validity buffer
  * (bit vector) is maintained to track which elements in the vector are null.
  */
-public class TimeStampMilliVector extends TimeStampVector {
+public final class TimeStampMilliVector extends TimeStampVector {
   private final FieldReader reader;
 
   /**
    * Instantiate a TimeStampMilliVector. This doesn't allocate any memory for
    * the data in vector.
+   *
    * @param name name of the vector
    * @param allocator allocator for memory management.
    */
@@ -49,6 +52,7 @@ public class TimeStampMilliVector extends TimeStampVector {
   /**
    * Instantiate a TimeStampMilliVector. This doesn't allocate any memory for
    * the data in vector.
+   *
    * @param name name of the vector
    * @param fieldType type of Field materialized by this vector
    * @param allocator allocator for memory management.
@@ -59,7 +63,20 @@ public class TimeStampMilliVector extends TimeStampVector {
   }
 
   /**
-   * Get a reader that supports reading values from this vector
+   * Instantiate a TimeStampMilliVector. This doesn't allocate any memory for
+   * the data in vector.
+   *
+   * @param field field materialized by this vector
+   * @param allocator allocator for memory management.
+   */
+  public TimeStampMilliVector(Field field, BufferAllocator allocator) {
+    super(field, allocator);
+    reader = new TimeStampMilliReaderImpl(TimeStampMilliVector.this);
+  }
+
+  /**
+   * Get a reader that supports reading values from this vector.
+   *
    * @return Field Reader for this vector
    */
   @Override
@@ -70,6 +87,7 @@ public class TimeStampMilliVector extends TimeStampVector {
   /**
    * Get minor type for this vector. The vector holds values belonging
    * to a particular type.
+   *
    * @return {@link org.apache.arrow.vector.types.Types.MinorType}
    */
   @Override
@@ -78,11 +96,11 @@ public class TimeStampMilliVector extends TimeStampVector {
   }
 
 
-  /******************************************************************
-   *                                                                *
-   *          vector value retrieval methods                        *
-   *                                                                *
-   ******************************************************************/
+  /*----------------------------------------------------------------*
+   |                                                                |
+   |          vector value retrieval methods                        |
+   |                                                                |
+   *----------------------------------------------------------------*/
 
 
   /**
@@ -112,18 +130,16 @@ public class TimeStampMilliVector extends TimeStampVector {
       return null;
     } else {
       final long millis = valueBuffer.getLong(index * TYPE_WIDTH);
-      final org.joda.time.LocalDateTime localDateTime = new org.joda.time.LocalDateTime(millis,
-              org.joda.time.DateTimeZone.UTC);
-      return localDateTime;
+      return DateUtility.getLocalDateTimeFromEpochMilli(millis);
     }
   }
 
 
-  /******************************************************************
-   *                                                                *
-   *          vector value setter methods                           *
-   *                                                                *
-   ******************************************************************/
+  /*----------------------------------------------------------------*
+   |                                                                |
+   |          vector value setter methods                           |
+   |                                                                |
+   *----------------------------------------------------------------*/
 
 
   /**
@@ -183,16 +199,17 @@ public class TimeStampMilliVector extends TimeStampVector {
   }
 
 
-  /******************************************************************
-   *                                                                *
-   *                      vector transfer                           *
-   *                                                                *
-   ******************************************************************/
+  /*----------------------------------------------------------------*
+   |                                                                |
+   |                      vector transfer                           |
+   |                                                                |
+   *----------------------------------------------------------------*/
 
 
   /**
    * Construct a TransferPair comprising of this and and a target vector of
    * the same type.
+   *
    * @param ref name of the target vector
    * @param allocator allocator for the target vector
    * @return {@link TransferPair}
@@ -206,6 +223,7 @@ public class TimeStampMilliVector extends TimeStampVector {
 
   /**
    * Construct a TransferPair with a desired target vector of the same type.
+   *
    * @param to target vector
    * @return {@link TransferPair}
    */

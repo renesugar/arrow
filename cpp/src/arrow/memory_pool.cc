@@ -17,17 +17,15 @@
 
 #include "arrow/memory_pool.h"
 
-#include <algorithm>
-#include <atomic>
-#include <cerrno>
-#include <cstdlib>
-#include <cstring>
-#include <iostream>
+#include <algorithm>  // IWYU pragma: keep
+#include <cstdlib>    // IWYU pragma: keep
+#include <cstring>    // IWYU pragma: keep
+#include <iostream>   // IWYU pragma: keep
+#include <limits>
 #include <memory>
-#include <sstream>  // IWYU pragma: keep
 
 #include "arrow/status.h"
-#include "arrow/util/logging.h"
+#include "arrow/util/logging.h"  // IWYU pragma: keep
 
 #ifdef ARROW_JEMALLOC
 // Needed to support jemalloc 3 and 4
@@ -36,49 +34,229 @@
 #include "jemalloc_ep/dist/include/jemalloc/jemalloc.h"
 #endif
 
+#ifdef ARROW_MIMALLOC
+#include <mimalloc.h>
+#endif
+
+#ifdef ARROW_JEMALLOC
+
+// Compile-time configuration for jemalloc options.
+// Note the prefix ("je_arrow_") must match the symbol prefix given when
+// building jemalloc.
+// See discussion in https://github.com/jemalloc/jemalloc/issues/1621
+
+// ARROW-6910(wesm): we found that jemalloc's default behavior with respect to
+// dirty / muzzy pages (see definitions of these in the jemalloc documentation)
+// conflicted with user expectations, and would even cause memory use problems
+// in some cases. By enabling the background_thread option and reducing the
+// decay time from 10 seconds to 1 seconds, memory is released more
+// aggressively (and in the background) to the OS. This can be configured
+// further by using the arrow::jemalloc_set_decay_ms API
+
+#undef USE_JEMALLOC_BACKGROUND_THREAD
+#ifndef __APPLE__
+// ARROW-6977: jemalloc's background_thread isn't always enabled on macOS
+#define USE_JEMALLOC_BACKGROUND_THREAD
+#endif
+
+// In debug mode, add memory poisoning on alloc / free
+#ifdef NDEBUG
+#define JEMALLOC_DEBUG_OPTIONS ""
+#else
+#define JEMALLOC_DEBUG_OPTIONS ",junk:true"
+#endif
+
+const char* je_arrow_malloc_conf =
+    ("oversize_threshold:0"
+     ",dirty_decay_ms:1000"
+     ",muzzy_decay_ms:1000"
+#ifdef USE_JEMALLOC_BACKGROUND_THREAD
+     ",background_thread:true"
+#endif
+     JEMALLOC_DEBUG_OPTIONS);  // NOLINT: whitespace/parens
+
+#endif  // ARROW_JEMALLOC
+
 namespace arrow {
 
 constexpr size_t kAlignment = 64;
 
 namespace {
-// Allocate memory according to the alignment requirements for Arrow
-// (as of May 2016 64 bytes)
-Status AllocateAligned(int64_t size, uint8_t** out) {
-// TODO(emkornfield) find something compatible with windows
-#ifdef _MSC_VER
-  // Special code path for MSVC
-  *out =
-      reinterpret_cast<uint8_t*>(_aligned_malloc(static_cast<size_t>(size), kAlignment));
-  if (!*out) {
-    std::stringstream ss;
-    ss << "malloc of size " << size << " failed";
-    return Status::OutOfMemory(ss.str());
-  }
-#elif defined(ARROW_JEMALLOC)
-  *out = reinterpret_cast<uint8_t*>(mallocx(
-      std::max(static_cast<size_t>(size), kAlignment), MALLOCX_ALIGN(kAlignment)));
-  if (*out == NULL) {
-    std::stringstream ss;
-    ss << "malloc of size " << size << " failed";
-    return Status::OutOfMemory(ss.str());
-  }
+
+// A static piece of memory for 0-size allocations, so as to return
+// an aligned non-null pointer.
+alignas(kAlignment) static uint8_t zero_size_area[1];
+
+// Helper class directing allocations to the standard system allocator.
+class SystemAllocator {
+ public:
+  // Allocate memory according to the alignment requirements for Arrow
+  // (as of May 2016 64 bytes)
+  static Status AllocateAligned(int64_t size, uint8_t** out) {
+    if (size == 0) {
+      *out = zero_size_area;
+      return Status::OK();
+    }
+#ifdef _WIN32
+    // Special code path for Windows
+    *out = reinterpret_cast<uint8_t*>(
+        _aligned_malloc(static_cast<size_t>(size), kAlignment));
+    if (!*out) {
+      return Status::OutOfMemory("malloc of size ", size, " failed");
+    }
 #else
-  const int result = posix_memalign(reinterpret_cast<void**>(out), kAlignment,
-                                    static_cast<size_t>(size));
-  if (result == ENOMEM) {
-    std::stringstream ss;
-    ss << "malloc of size " << size << " failed";
-    return Status::OutOfMemory(ss.str());
+    const int result = posix_memalign(reinterpret_cast<void**>(out), kAlignment,
+                                      static_cast<size_t>(size));
+    if (result == ENOMEM) {
+      return Status::OutOfMemory("malloc of size ", size, " failed");
+    }
+
+    if (result == EINVAL) {
+      return Status::Invalid("invalid alignment parameter: ", kAlignment);
+    }
+#endif
+    return Status::OK();
   }
 
-  if (result == EINVAL) {
-    std::stringstream ss;
-    ss << "invalid alignment parameter: " << kAlignment;
-    return Status::Invalid(ss.str());
+  static Status ReallocateAligned(int64_t old_size, int64_t new_size, uint8_t** ptr) {
+    uint8_t* previous_ptr = *ptr;
+    if (previous_ptr == zero_size_area) {
+      DCHECK_EQ(old_size, 0);
+      return AllocateAligned(new_size, ptr);
+    }
+    if (new_size == 0) {
+      DeallocateAligned(previous_ptr, old_size);
+      *ptr = zero_size_area;
+      return Status::OK();
+    }
+    // Note: We cannot use realloc() here as it doesn't guarantee alignment.
+
+    // Allocate new chunk
+    uint8_t* out = nullptr;
+    RETURN_NOT_OK(AllocateAligned(new_size, &out));
+    DCHECK(out);
+    // Copy contents and release old memory chunk
+    memcpy(out, *ptr, static_cast<size_t>(std::min(new_size, old_size)));
+#ifdef _WIN32
+    _aligned_free(*ptr);
+#else
+    free(*ptr);
+#endif  // defined(_WIN32)
+    *ptr = out;
+    return Status::OK();
   }
+
+  static void DeallocateAligned(uint8_t* ptr, int64_t size) {
+    if (ptr == zero_size_area) {
+      DCHECK_EQ(size, 0);
+    } else {
+#ifdef _WIN32
+      _aligned_free(ptr);
+#else
+      free(ptr);
 #endif
-  return Status::OK();
-}
+    }
+  }
+};
+
+#ifdef ARROW_JEMALLOC
+
+// Helper class directing allocations to the jemalloc allocator.
+class JemallocAllocator {
+ public:
+  static Status AllocateAligned(int64_t size, uint8_t** out) {
+    if (size == 0) {
+      *out = zero_size_area;
+      return Status::OK();
+    }
+    *out = reinterpret_cast<uint8_t*>(
+        mallocx(static_cast<size_t>(size), MALLOCX_ALIGN(kAlignment)));
+    if (*out == NULL) {
+      return Status::OutOfMemory("malloc of size ", size, " failed");
+    }
+    return Status::OK();
+  }
+
+  static Status ReallocateAligned(int64_t old_size, int64_t new_size, uint8_t** ptr) {
+    uint8_t* previous_ptr = *ptr;
+    if (previous_ptr == zero_size_area) {
+      DCHECK_EQ(old_size, 0);
+      return AllocateAligned(new_size, ptr);
+    }
+    if (new_size == 0) {
+      DeallocateAligned(previous_ptr, old_size);
+      *ptr = zero_size_area;
+      return Status::OK();
+    }
+    *ptr = reinterpret_cast<uint8_t*>(
+        rallocx(*ptr, static_cast<size_t>(new_size), MALLOCX_ALIGN(kAlignment)));
+    if (*ptr == NULL) {
+      *ptr = previous_ptr;
+      return Status::OutOfMemory("realloc of size ", new_size, " failed");
+    }
+    return Status::OK();
+  }
+
+  static void DeallocateAligned(uint8_t* ptr, int64_t size) {
+    if (ptr == zero_size_area) {
+      DCHECK_EQ(size, 0);
+    } else {
+      dallocx(ptr, MALLOCX_ALIGN(kAlignment));
+    }
+  }
+};
+
+#endif  // defined(ARROW_JEMALLOC)
+
+#ifdef ARROW_MIMALLOC
+
+// Helper class directing allocations to the mimalloc allocator.
+class MimallocAllocator {
+ public:
+  static Status AllocateAligned(int64_t size, uint8_t** out) {
+    if (size == 0) {
+      *out = zero_size_area;
+      return Status::OK();
+    }
+    *out = reinterpret_cast<uint8_t*>(
+        mi_malloc_aligned(static_cast<size_t>(size), kAlignment));
+    if (*out == NULL) {
+      return Status::OutOfMemory("malloc of size ", size, " failed");
+    }
+    return Status::OK();
+  }
+
+  static Status ReallocateAligned(int64_t old_size, int64_t new_size, uint8_t** ptr) {
+    uint8_t* previous_ptr = *ptr;
+    if (previous_ptr == zero_size_area) {
+      DCHECK_EQ(old_size, 0);
+      return AllocateAligned(new_size, ptr);
+    }
+    if (new_size == 0) {
+      DeallocateAligned(previous_ptr, old_size);
+      *ptr = zero_size_area;
+      return Status::OK();
+    }
+    *ptr = reinterpret_cast<uint8_t*>(
+        mi_realloc_aligned(previous_ptr, static_cast<size_t>(new_size), kAlignment));
+    if (*ptr == NULL) {
+      *ptr = previous_ptr;
+      return Status::OutOfMemory("realloc of size ", new_size, " failed");
+    }
+    return Status::OK();
+  }
+
+  static void DeallocateAligned(uint8_t* ptr, int64_t size) {
+    if (ptr == zero_size_area) {
+      DCHECK_EQ(size, 0);
+    } else {
+      mi_free(ptr);
+    }
+  }
+};
+
+#endif  // defined(ARROW_MIMALLOC)
+
 }  // namespace
 
 MemoryPool::MemoryPool() {}
@@ -88,98 +266,175 @@ MemoryPool::~MemoryPool() {}
 int64_t MemoryPool::max_memory() const { return -1; }
 
 ///////////////////////////////////////////////////////////////////////
-// Helper tracking memory statistics
+// MemoryPool implementation that delegates its core duty
+// to an Allocator class.
 
-class MemoryPoolStats {
+#ifndef NDEBUG
+static constexpr uint8_t kAllocPoison = 0xBC;
+static constexpr uint8_t kReallocPoison = 0xBD;
+static constexpr uint8_t kDeallocPoison = 0xBE;
+#endif
+
+template <typename Allocator>
+class BaseMemoryPoolImpl : public MemoryPool {
  public:
-  MemoryPoolStats() : bytes_allocated_(0), max_memory_(0) {}
-
-  int64_t max_memory() const { return max_memory_.load(); }
-
-  int64_t bytes_allocated() const { return bytes_allocated_.load(); }
-
-  inline void UpdateAllocatedBytes(int64_t diff) {
-    auto allocated = bytes_allocated_.fetch_add(diff) + diff;
-    DCHECK_GE(allocated, 0) << "allocation counter became negative";
-    // "maximum" allocated memory is ill-defined in multi-threaded code,
-    // so don't try to be too rigorous here
-    if (diff > 0 && allocated > max_memory_) {
-      max_memory_ = allocated;
-    }
-  }
-
- protected:
-  std::atomic<int64_t> bytes_allocated_;
-  std::atomic<int64_t> max_memory_;
-};
-
-///////////////////////////////////////////////////////////////////////
-// Default MemoryPool implementation
-
-class DefaultMemoryPool : public MemoryPool {
- public:
-  ~DefaultMemoryPool() override {}
+  ~BaseMemoryPoolImpl() override {}
 
   Status Allocate(int64_t size, uint8_t** out) override {
-    RETURN_NOT_OK(AllocateAligned(size, out));
+    if (size < 0) {
+      return Status::Invalid("negative malloc size");
+    }
+    if (static_cast<uint64_t>(size) >= std::numeric_limits<size_t>::max()) {
+      return Status::CapacityError("malloc size overflows size_t");
+    }
+    RETURN_NOT_OK(Allocator::AllocateAligned(size, out));
+#ifndef NDEBUG
+    // Poison data
+    if (size > 0) {
+      DCHECK_NE(*out, nullptr);
+      (*out)[0] = kAllocPoison;
+      (*out)[size - 1] = kAllocPoison;
+    }
+#endif
 
     stats_.UpdateAllocatedBytes(size);
     return Status::OK();
   }
 
   Status Reallocate(int64_t old_size, int64_t new_size, uint8_t** ptr) override {
-#ifdef ARROW_JEMALLOC
-    uint8_t* previous_ptr = *ptr;
-    *ptr = reinterpret_cast<uint8_t*>(rallocx(*ptr, new_size, MALLOCX_ALIGN(kAlignment)));
-    if (*ptr == NULL) {
-      std::stringstream ss;
-      ss << "realloc of size " << new_size << " failed";
-      *ptr = previous_ptr;
-      return Status::OutOfMemory(ss.str());
+    if (new_size < 0) {
+      return Status::Invalid("negative realloc size");
     }
-#else
-    // Note: We cannot use realloc() here as it doesn't guarantee alignment.
-
-    // Allocate new chunk
-    uint8_t* out = nullptr;
-    RETURN_NOT_OK(AllocateAligned(new_size, &out));
-    DCHECK(out);
-    // Copy contents and release old memory chunk
-    memcpy(out, *ptr, static_cast<size_t>(std::min(new_size, old_size)));
-#ifdef _MSC_VER
-    _aligned_free(*ptr);
-#else
-    std::free(*ptr);
-#endif  // defined(_MSC_VER)
-    *ptr = out;
-#endif  // defined(ARROW_JEMALLOC)
+    if (static_cast<uint64_t>(new_size) >= std::numeric_limits<size_t>::max()) {
+      return Status::CapacityError("realloc overflows size_t");
+    }
+    RETURN_NOT_OK(Allocator::ReallocateAligned(old_size, new_size, ptr));
+#ifndef NDEBUG
+    // Poison data
+    if (new_size > old_size) {
+      DCHECK_NE(*ptr, nullptr);
+      (*ptr)[old_size] = kReallocPoison;
+      (*ptr)[new_size - 1] = kReallocPoison;
+    }
+#endif
 
     stats_.UpdateAllocatedBytes(new_size - old_size);
     return Status::OK();
   }
 
-  int64_t bytes_allocated() const override { return stats_.bytes_allocated(); }
-
   void Free(uint8_t* buffer, int64_t size) override {
-#ifdef _MSC_VER
-    _aligned_free(buffer);
-#elif defined(ARROW_JEMALLOC)
-    dallocx(buffer, MALLOCX_ALIGN(kAlignment));
-#else
-    std::free(buffer);
+#ifndef NDEBUG
+    // Poison data
+    if (size > 0) {
+      DCHECK_NE(buffer, nullptr);
+      buffer[0] = kDeallocPoison;
+      buffer[size - 1] = kDeallocPoison;
+    }
 #endif
+    Allocator::DeallocateAligned(buffer, size);
+
     stats_.UpdateAllocatedBytes(-size);
   }
 
+  int64_t bytes_allocated() const override { return stats_.bytes_allocated(); }
+
   int64_t max_memory() const override { return stats_.max_memory(); }
 
- private:
-  MemoryPoolStats stats_;
+ protected:
+  internal::MemoryPoolStats stats_;
 };
 
+class SystemMemoryPool : public BaseMemoryPoolImpl<SystemAllocator> {
+ public:
+  std::string backend_name() const override { return "system"; }
+};
+
+#ifdef ARROW_JEMALLOC
+class JemallocMemoryPool : public BaseMemoryPoolImpl<JemallocAllocator> {
+ public:
+  std::string backend_name() const override { return "jemalloc"; }
+};
+#endif
+
+#ifdef ARROW_MIMALLOC
+class MimallocMemoryPool : public BaseMemoryPoolImpl<MimallocAllocator> {
+ public:
+  std::string backend_name() const override { return "mimalloc"; }
+};
+#endif
+
+#ifdef ARROW_JEMALLOC
+using DefaultMemoryPool = JemallocMemoryPool;
+#elif defined(ARROW_MIMALLOC)
+using DefaultMemoryPool = MimallocMemoryPool;
+#else
+using DefaultMemoryPool = SystemMemoryPool;
+#endif
+
+std::unique_ptr<MemoryPool> MemoryPool::CreateDefault() {
+  return std::unique_ptr<MemoryPool>(new DefaultMemoryPool);
+}
+
+static SystemMemoryPool system_pool;
+#ifdef ARROW_JEMALLOC
+static JemallocMemoryPool jemalloc_pool;
+#endif
+#ifdef ARROW_MIMALLOC
+static MimallocMemoryPool mimalloc_pool;
+#endif
+
+MemoryPool* system_memory_pool() { return &system_pool; }
+
+Status jemalloc_memory_pool(MemoryPool** out) {
+#ifdef ARROW_JEMALLOC
+  *out = &jemalloc_pool;
+  return Status::OK();
+#else
+  return Status::NotImplemented("This Arrow build does not enable jemalloc");
+#endif
+}
+
+Status mimalloc_memory_pool(MemoryPool** out) {
+#ifdef ARROW_MIMALLOC
+  *out = &mimalloc_pool;
+  return Status::OK();
+#else
+  return Status::NotImplemented("This Arrow build does not enable mimalloc");
+#endif
+}
+
 MemoryPool* default_memory_pool() {
-  static DefaultMemoryPool default_memory_pool_;
-  return &default_memory_pool_;
+#ifdef ARROW_JEMALLOC
+  return &jemalloc_pool;
+#elif defined(ARROW_MIMALLOC)
+  return &mimalloc_pool;
+#else
+  return &system_pool;
+#endif
+}
+
+#define RETURN_IF_JEMALLOC_ERROR(ERR)                  \
+  do {                                                 \
+    if (err != 0) {                                    \
+      return Status::UnknownError(std::strerror(ERR)); \
+    }                                                  \
+  } while (0)
+
+Status jemalloc_set_decay_ms(int ms) {
+#ifdef ARROW_JEMALLOC
+  ssize_t decay_time_ms = static_cast<ssize_t>(ms);
+
+  int err = mallctl("arenas.dirty_decay_ms", nullptr, nullptr, &decay_time_ms,
+                    sizeof(decay_time_ms));
+  RETURN_IF_JEMALLOC_ERROR(err);
+  err = mallctl("arenas.muzzy_decay_ms", nullptr, nullptr, &decay_time_ms,
+                sizeof(decay_time_ms));
+  RETURN_IF_JEMALLOC_ERROR(err);
+
+  return Status::OK();
+#else
+  return Status::Invalid("jemalloc support is not built");
+#endif
 }
 
 ///////////////////////////////////////////////////////////////////////
@@ -217,6 +472,8 @@ int64_t LoggingMemoryPool::max_memory() const {
   return mem;
 }
 
+std::string LoggingMemoryPool::backend_name() const { return pool_->backend_name(); }
+
 ///////////////////////////////////////////////////////////////////////
 // ProxyMemoryPool implementation
 
@@ -245,9 +502,11 @@ class ProxyMemoryPool::ProxyMemoryPoolImpl {
 
   int64_t max_memory() const { return stats_.max_memory(); }
 
+  std::string backend_name() const { return pool_->backend_name(); }
+
  private:
   MemoryPool* pool_;
-  MemoryPoolStats stats_;
+  internal::MemoryPoolStats stats_;
 };
 
 ProxyMemoryPool::ProxyMemoryPool(MemoryPool* pool) {
@@ -271,5 +530,7 @@ void ProxyMemoryPool::Free(uint8_t* buffer, int64_t size) {
 int64_t ProxyMemoryPool::bytes_allocated() const { return impl_->bytes_allocated(); }
 
 int64_t ProxyMemoryPool::max_memory() const { return impl_->max_memory(); }
+
+std::string ProxyMemoryPool::backend_name() const { return impl_->backend_name(); }
 
 }  // namespace arrow

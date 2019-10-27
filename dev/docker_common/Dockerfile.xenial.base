@@ -45,17 +45,22 @@ RUN wget https://repo.continuum.io/miniconda/Miniconda3-latest-Linux-x86_64.sh -
       pandas \
       pytest \
       cmake \
-      flatbuffers \
+      double-conversion \
       rapidjson \
       boost-cpp \
       thrift-cpp \
       snappy \
       zlib \
       gflags \
+      glog \
+      gtest \
+      re2 \
       brotli \
-      jemalloc \
       lz4-c \
       zstd \
       setuptools \
       setuptools_scm \
  && conda clean --all
+
+ADD docker_common/install_clang_tools_xenial.sh /
+RUN /install_clang_tools_xenial.sh

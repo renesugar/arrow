@@ -33,7 +33,7 @@ namespace internal {
 Status ImportDecimalType(OwnedRef* decimal_type) {
   OwnedRef decimal_module;
   RETURN_NOT_OK(ImportModule("decimal", &decimal_module));
-  RETURN_NOT_OK(ImportFromModule(decimal_module, "Decimal", decimal_type));
+  RETURN_NOT_OK(ImportFromModule(decimal_module.obj(), "Decimal", decimal_type));
   return Status::OK();
 }
 
@@ -107,29 +107,23 @@ PyObject* DecimalFromString(PyObject* decimal_constructor,
                                string_size);
 }
 
-Status DecimalFromPythonDecimal(PyObject* python_decimal, const DecimalType& arrow_type,
-                                Decimal128* out) {
-  DCHECK_NE(python_decimal, NULLPTR);
-  DCHECK_NE(out, NULLPTR);
+namespace {
 
-  std::string string;
-  RETURN_NOT_OK(PythonDecimalToString(python_decimal, &string));
-
+Status DecimalFromStdString(const std::string& decimal_string,
+                            const DecimalType& arrow_type, Decimal128* out) {
   int32_t inferred_precision;
   int32_t inferred_scale;
 
   RETURN_NOT_OK(
-      Decimal128::FromString(string, out, &inferred_precision, &inferred_scale));
+      Decimal128::FromString(decimal_string, out, &inferred_precision, &inferred_scale));
 
   const int32_t precision = arrow_type.precision();
   const int32_t scale = arrow_type.scale();
 
   if (ARROW_PREDICT_FALSE(inferred_precision > precision)) {
-    std::stringstream buf;
-    buf << "Decimal type with precision " << inferred_precision
-        << " does not fit into precision inferred from first array element: "
-        << precision;
-    return Status::Invalid(buf.str());
+    return Status::Invalid(
+        "Decimal type with precision ", inferred_precision,
+        " does not fit into precision inferred from first array element: ", precision);
   }
 
   if (scale != inferred_scale) {
@@ -139,17 +133,46 @@ Status DecimalFromPythonDecimal(PyObject* python_decimal, const DecimalType& arr
   return Status::OK();
 }
 
+}  // namespace
+
+Status DecimalFromPythonDecimal(PyObject* python_decimal, const DecimalType& arrow_type,
+                                Decimal128* out) {
+  DCHECK_NE(python_decimal, NULLPTR);
+  DCHECK_NE(out, NULLPTR);
+
+  std::string string;
+  RETURN_NOT_OK(PythonDecimalToString(python_decimal, &string));
+  return DecimalFromStdString(string, arrow_type, out);
+}
+
+Status DecimalFromPyObject(PyObject* obj, const DecimalType& arrow_type,
+                           Decimal128* out) {
+  DCHECK_NE(obj, NULLPTR);
+  DCHECK_NE(out, NULLPTR);
+
+  if (IsPyInteger(obj)) {
+    // TODO: add a fast path for small-ish ints
+    std::string string;
+    RETURN_NOT_OK(PyObject_StdStringStr(obj, &string));
+    return DecimalFromStdString(string, arrow_type, out);
+  } else if (PyDecimal_Check(obj)) {
+    return DecimalFromPythonDecimal(obj, arrow_type, out);
+  } else {
+    return Status::TypeError("int or Decimal object expected, got ",
+                             Py_TYPE(obj)->tp_name);
+  }
+}
+
 bool PyDecimal_Check(PyObject* obj) {
   static OwnedRef decimal_type;
   if (!decimal_type.obj()) {
-    Status status = ImportDecimalType(&decimal_type);
-    DCHECK_OK(status);
+    ARROW_CHECK_OK(ImportDecimalType(&decimal_type));
     DCHECK(PyType_Check(decimal_type.obj()));
   }
   // PyObject_IsInstance() is slower as it has to check for virtual subclasses
   const int result =
       PyType_IsSubtype(Py_TYPE(obj), reinterpret_cast<PyTypeObject*>(decimal_type.obj()));
-  DCHECK_NE(result, -1) << " error during PyType_IsSubtype check";
+  ARROW_CHECK_NE(result, -1) << " error during PyType_IsSubtype check";
   return result == 1;
 }
 
@@ -185,7 +208,6 @@ Status DecimalMetadata::Update(int32_t suggested_precision, int32_t suggested_sc
 
 Status DecimalMetadata::Update(PyObject* object) {
   bool is_decimal = PyDecimal_Check(object);
-  DCHECK(is_decimal) << "Object is not a Python Decimal";
 
   if (ARROW_PREDICT_FALSE(!is_decimal || PyDecimal_ISNAN(object))) {
     return Status::OK();

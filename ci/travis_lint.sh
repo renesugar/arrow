@@ -23,33 +23,57 @@ set -ex
 export ARROW_TRAVIS_USE_TOOLCHAIN=0
 source $TRAVIS_BUILD_DIR/ci/travis_env_common.sh
 
-# Fail fast for code linting issues
+# pytest, requests, and jira are needed to run the PR merge script unit tests
+pip install pre_commit cmake_format==0.5.2 pytest requests jira
+pre-commit install
 
+# TODO: Move more checks into pre-commit as this gives a nice summary
+# and doesn't abort on the first failed check.
+pre-commit run hadolint -a
+
+# CMake formatting check
+$TRAVIS_BUILD_DIR/run-cmake-format.py --check
+
+# C++ code linting
 if [ "$ARROW_CI_CPP_AFFECTED" != "0" ]; then
   mkdir $ARROW_CPP_DIR/lint
   pushd $ARROW_CPP_DIR/lint
 
-  cmake ..
+  cmake .. -DARROW_ONLY_LINT=ON
   make lint
-
-  if [ "$ARROW_TRAVIS_CLANG_FORMAT" == "1" ]; then
-    make check-format
-  fi
+  make check-format
 
   python $ARROW_CPP_DIR/build-support/lint_cpp_cli.py $ARROW_CPP_DIR/src
 
   popd
 fi
 
+# Python style checks
+# (need Python 3 for crossbow)
+FLAKE8="python3 -m flake8"
+python3 -m pip install -q flake8
 
-# Fail fast on style checks
+if [ "$ARROW_CI_DEV_AFFECTED" != "0" ]; then
+  pushd $ARROW_DEV_DIR
+  $FLAKE8 --count .
+  py.test test_merge_arrow_pr.py
+  popd
+fi
+
+if [ "$ARROW_CI_INTEGRATION_AFFECTED" != "0" ]; then
+  $FLAKE8 --count $ARROW_INTEGRATION_DIR
+fi
 
 if [ "$ARROW_CI_PYTHON_AFFECTED" != "0" ]; then
-  sudo pip install -q flake8
-
-  flake8 --count $ARROW_PYTHON_DIR
-
+  $FLAKE8 --count $ARROW_PYTHON_DIR
   # Check Cython files with some checks turned off
-  flake8 --count --config=$ARROW_PYTHON_DIR/.flake8.cython \
-         $ARROW_PYTHON_DIR
+  $FLAKE8 --count \
+          --config=$ARROW_PYTHON_DIR/.flake8.cython \
+          $ARROW_PYTHON_DIR
+fi
+
+if [ "$ARROW_CI_R_AFFECTED" != "0" ]; then
+  pushd $ARROW_R_DIR
+  ./lint.sh
+  popd
 fi

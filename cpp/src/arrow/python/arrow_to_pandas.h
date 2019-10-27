@@ -27,7 +27,8 @@
 #include <string>
 #include <unordered_set>
 
-#include "arrow/util/visibility.h"
+#include "arrow/memory_pool.h"
+#include "arrow/python/visibility.h"
 
 namespace arrow {
 
@@ -42,31 +43,36 @@ class Table;
 namespace py {
 
 struct PandasOptions {
-  /// If true, we will convert all string columns to categoricals
-  bool strings_to_categorical;
-  bool zero_copy_only;
-  bool integer_object_nulls;
-  bool use_threads;
+  /// arrow::MemoryPool to use for memory allocations
+  MemoryPool* pool = default_memory_pool();
 
-  PandasOptions()
-      : strings_to_categorical(false),
-        zero_copy_only(false),
-        integer_object_nulls(false),
-        use_threads(false) {}
+  /// If true, we will convert all string columns to categoricals
+  bool strings_to_categorical = false;
+  bool zero_copy_only = false;
+  bool integer_object_nulls = false;
+  bool date_as_object = false;
+  bool use_threads = false;
+
+  /// \brief If true, do not create duplicate PyObject versions of equal
+  /// objects. This only applies to immutable objects like strings or datetime
+  /// objects
+  bool deduplicate_objects = false;
 };
 
-ARROW_EXPORT
-Status ConvertArrayToPandas(PandasOptions options, const std::shared_ptr<Array>& arr,
-                            PyObject* py_ref, PyObject** out);
+ARROW_PYTHON_EXPORT
+Status ConvertArrayToPandas(const PandasOptions& options,
+                            const std::shared_ptr<Array>& arr, PyObject* py_ref,
+                            PyObject** out);
 
-ARROW_EXPORT
-Status ConvertChunkedArrayToPandas(PandasOptions options,
+ARROW_PYTHON_EXPORT
+Status ConvertChunkedArrayToPandas(const PandasOptions& options,
                                    const std::shared_ptr<ChunkedArray>& col,
                                    PyObject* py_ref, PyObject** out);
 
-ARROW_EXPORT
-Status ConvertColumnToPandas(PandasOptions options, const std::shared_ptr<Column>& col,
-                             PyObject* py_ref, PyObject** out);
+ARROW_PYTHON_EXPORT
+Status ConvertColumnToPandas(const PandasOptions& options,
+                             const std::shared_ptr<Column>& col, PyObject* py_ref,
+                             PyObject** out);
 
 // Convert a whole table as efficiently as possible to a pandas.DataFrame.
 //
@@ -74,19 +80,24 @@ Status ConvertColumnToPandas(PandasOptions options, const std::shared_ptr<Column
 // BlockManager structure of the pandas.DataFrame used as of pandas 0.19.x.
 //
 // tuple item: (indices: ndarray[int32], block: ndarray[TYPE, ndim=2])
-ARROW_EXPORT
-Status ConvertTableToPandas(PandasOptions options, const std::shared_ptr<Table>& table,
-                            MemoryPool* pool, PyObject** out);
+ARROW_PYTHON_EXPORT
+Status ConvertTableToPandas(const PandasOptions& options,
+                            const std::shared_ptr<Table>& table, PyObject** out);
 
 /// Convert a whole table as efficiently as possible to a pandas.DataFrame.
 ///
 /// Explicitly name columns that should be a categorical
 /// This option is only used on conversions that are applied to a table.
-ARROW_EXPORT
-Status ConvertTableToPandas(PandasOptions options,
+ARROW_PYTHON_EXPORT
+Status ConvertTableToPandas(const PandasOptions& options,
                             const std::unordered_set<std::string>& categorical_columns,
-                            const std::shared_ptr<Table>& table, MemoryPool* pool,
-                            PyObject** out);
+                            const std::shared_ptr<Table>& table, PyObject** out);
+
+ARROW_PYTHON_EXPORT
+Status ConvertTableToPandas(const PandasOptions& options,
+                            const std::unordered_set<std::string>& categorical_columns,
+                            const std::unordered_set<std::string>& extension_columns,
+                            const std::shared_ptr<Table>& table, PyObject** out);
 
 }  // namespace py
 }  // namespace arrow

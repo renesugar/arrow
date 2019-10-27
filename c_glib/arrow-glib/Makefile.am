@@ -38,6 +38,10 @@ libarrow_glib_la_CXXFLAGS =			\
 	$(ARROW_CFLAGS)				\
 	$(GARROW_CXXFLAGS)
 
+libarrow_glib_la_LDFLAGS =			\
+	-version-info $(LT_VERSION_INFO)	\
+	-no-undefined
+
 libarrow_glib_la_LIBADD =			\
 	$(GLIB_LIBS)				\
 	$(ARROW_LIBS)
@@ -50,11 +54,11 @@ libarrow_glib_la_headers =			\
 	basic-data-type.h			\
 	buffer.h				\
 	chunked-array.h				\
-	column.h				\
+	codec.h					\
 	composite-array.h			\
 	composite-data-type.h			\
 	data-type.h				\
-	decimal.h				\
+	decimal128.h				\
 	error.h					\
 	field.h					\
 	gobject-type.h				\
@@ -71,8 +75,8 @@ libarrow_glib_la_headers +=			\
 	input-stream.h				\
 	output-stream.h				\
 	readable.h				\
-	writeable.h				\
-	writeable-file.h
+	writable.h				\
+	writable-file.h
 
 libarrow_glib_la_headers +=			\
 	metadata-version.h			\
@@ -101,10 +105,10 @@ libarrow_glib_la_sources =			\
 	basic-data-type.cpp			\
 	buffer.cpp				\
 	chunked-array.cpp			\
-	column.cpp				\
+	codec.cpp				\
 	composite-array.cpp			\
 	composite-data-type.cpp			\
-	decimal.cpp				\
+	decimal128.cpp				\
 	error.cpp				\
 	field.cpp				\
 	record-batch.cpp			\
@@ -122,8 +126,8 @@ libarrow_glib_la_sources +=			\
 	input-stream.cpp			\
 	output-stream.cpp			\
 	readable.cpp				\
-	writeable.cpp				\
-	writeable-file.cpp
+	writable.cpp				\
+	writable-file.cpp
 
 libarrow_glib_la_sources +=			\
 	metadata-version.cpp			\
@@ -146,9 +150,9 @@ libarrow_glib_la_cpp_headers =			\
 	basic-data-type.hpp			\
 	buffer.hpp				\
 	chunked-array.hpp			\
-	column.hpp				\
+	codec.hpp				\
 	data-type.hpp				\
-	decimal.hpp				\
+	decimal128.hpp				\
 	error.hpp				\
 	field.hpp				\
 	record-batch.hpp			\
@@ -164,8 +168,8 @@ libarrow_glib_la_cpp_headers +=			\
 	input-stream.hpp			\
 	output-stream.hpp			\
 	readable.hpp				\
-	writeable.hpp				\
-	writeable-file.hpp
+	writable.hpp				\
+	writable-file.hpp
 
 libarrow_glib_la_cpp_headers +=			\
 	metadata-version.hpp			\
@@ -180,9 +184,13 @@ libarrow_glib_la_cpp_headers +=			\
 	orc-file-reader.hpp
 endif
 
+libarrow_glib_la_cpp_internal_headers =		\
+	internal-index.hpp
+
 libarrow_glib_la_SOURCES =			\
 	$(libarrow_glib_la_sources)		\
-	$(libarrow_glib_la_cpp_headers)
+	$(libarrow_glib_la_cpp_headers)		\
+	$(libarrow_glib_la_cpp_internal_headers)
 
 BUILT_SOURCES =					\
 	$(libarrow_glib_la_genearted_headers)	\

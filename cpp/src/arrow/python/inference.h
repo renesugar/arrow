@@ -24,12 +24,10 @@
 #include "arrow/python/platform.h"
 
 #include <memory>
-#include <ostream>
-#include <string>
 
+#include "arrow/python/visibility.h"
 #include "arrow/type.h"
 #include "arrow/util/macros.h"
-#include "arrow/util/visibility.h"
 
 #include "arrow/python/common.h"
 
@@ -40,13 +38,34 @@ class Status;
 
 namespace py {
 
-// These three functions take a sequence input, not arbitrary iterables
-ARROW_EXPORT
-arrow::Status InferArrowType(PyObject* obj, std::shared_ptr<arrow::DataType>* out_type);
+// These functions take a sequence input, not arbitrary iterables
 
-ARROW_EXPORT
-arrow::Status InferArrowTypeAndSize(PyObject* obj, int64_t* size,
+/// \brief Infer Arrow type from a Python sequence
+/// \param[in] obj the sequence of values
+/// \param[in] mask an optional mask where True values are null. May
+/// be nullptr
+/// \param[in] pandas_null_sentinels use pandas's null value markers
+/// \param[out] out_type the inferred type
+ARROW_PYTHON_EXPORT
+arrow::Status InferArrowType(PyObject* obj, PyObject* mask, bool pandas_null_sentinels,
+                             std::shared_ptr<arrow::DataType>* out_type);
+
+ARROW_PYTHON_EXPORT
+arrow::Status InferArrowTypeAndSize(PyObject* obj, PyObject* mask,
+                                    bool pandas_null_sentinels, int64_t* size,
                                     std::shared_ptr<arrow::DataType>* out_type);
+
+/// Checks whether the passed Python object is a boolean scalar
+ARROW_PYTHON_EXPORT
+bool IsPyBool(PyObject* obj);
+
+/// Checks whether the passed Python object is an integer scalar
+ARROW_PYTHON_EXPORT
+bool IsPyInt(PyObject* obj);
+
+/// Checks whether the passed Python object is a float scalar
+ARROW_PYTHON_EXPORT
+bool IsPyFloat(PyObject* obj);
 
 }  // namespace py
 }  // namespace arrow

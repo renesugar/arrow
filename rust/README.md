@@ -19,47 +19,49 @@
 
 # Native Rust implementation of Apache Arrow
 
-[![Build Status](https://travis-ci.org/apache/arrow.svg?branch=master)](https://travis-ci.org/apache/arrow)
-[![Coverage Status](https://coveralls.io/repos/github/apache/arrow/badge.svg)](https://coveralls.io/github/apache/arrow)
+## The Rust implementation of Arrow consists of the following crates
 
-## Status
+| Crate     | Description | Documentation |
+|-----------|-------------|---------------|
+|Arrow      | Core functionality (memory layout, array builders, low level computations) | [(README)](arrow/README.md) |
+|Parquet    | Parquet support | [(README)](parquet/README.md) |
+|DataFusion | In-memory query engine with SQL support | [(README)](datafusion/README.md) |
 
-This is a starting point for a native Rust implementation of Arrow.
+## Prerequisites
 
-The current code demonstrates arrays of primitive types and structs.
+Before running tests and examples it is necessary to set up the local development environment.
 
-## Creating an Array from a Vec
+### Git Submodules
 
-```rust
-// create a memory-aligned Arrow array from an existing Vec
-let array = PrimitiveArray::from(vec![1, 2, 3, 4, 5]);
+The tests rely on test data that is contained in git submodules.
 
-println!("array contents: {:?}", array.iter().collect::<Vec<i32>>());
-```
-
-## Creating an Array from a Builder
-
-```rust
-let mut builder: Builder<i32> = Builder::new();
-for i in 0..10 {
-    builder.push(i);
-}
-let buffer = builder.finish();
-let array = PrimitiveArray::from(buffer);
-
-println!("array contents: {:?}", array.iter().collect::<Vec<i32>>());
-```
-
-## Run Examples
-
-Examples can be run using the `cargo run --example` command. For example:
+To pull down this data run the following:
 
 ```bash
-cargo run --example array_from_builder
+git submodule update --init
 ```
 
-## Run Tests
+This populates data in two git submodules:
+
+- `cpp/submodules/parquet_testing/data` (sourced from https://github.com/apache/parquet-testing.git)
+- `testing` (sourced from https://github.com/apache/arrow-testing)
+
+Create two new environment variables to point to these directories as follows:
 
 ```bash
-cargo test
+export PARQUET_TEST_DATA=/path/to/arrow/cpp/submodules/parquet-testing/data
+export ARROW_TEST_DATA=/path/to/arrow/testing/data/
+```
+
+It is now possible to run `cargo test` as usual.
+
+## Code Formatting
+
+Our CI uses `rustfmt` to check code formatting.  Although the project is
+built and tested against nightly rust we use the stable version of
+`rustfmt`.  So before submitting a PR be sure to run the following
+and check for lint issues:
+
+```bash
+cargo +stable fmt --all -- --check
 ```

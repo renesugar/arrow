@@ -1,13 +1,12 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
+import org.apache.arrow.util.Preconditions;
 import org.apache.arrow.vector.BufferLayout.BufferType;
 import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.ArrowType.ArrowTypeVisitor;
@@ -31,11 +31,13 @@ import org.apache.arrow.vector.types.pojo.ArrowType.Binary;
 import org.apache.arrow.vector.types.pojo.ArrowType.Bool;
 import org.apache.arrow.vector.types.pojo.ArrowType.Date;
 import org.apache.arrow.vector.types.pojo.ArrowType.Decimal;
+import org.apache.arrow.vector.types.pojo.ArrowType.Duration;
 import org.apache.arrow.vector.types.pojo.ArrowType.FixedSizeBinary;
 import org.apache.arrow.vector.types.pojo.ArrowType.FixedSizeList;
 import org.apache.arrow.vector.types.pojo.ArrowType.FloatingPoint;
 import org.apache.arrow.vector.types.pojo.ArrowType.Int;
 import org.apache.arrow.vector.types.pojo.ArrowType.Interval;
+import org.apache.arrow.vector.types.pojo.ArrowType.Map;
 import org.apache.arrow.vector.types.pojo.ArrowType.Null;
 import org.apache.arrow.vector.types.pojo.ArrowType.Struct;
 import org.apache.arrow.vector.types.pojo.ArrowType.Time;
@@ -43,15 +45,16 @@ import org.apache.arrow.vector.types.pojo.ArrowType.Timestamp;
 import org.apache.arrow.vector.types.pojo.ArrowType.Union;
 import org.apache.arrow.vector.types.pojo.ArrowType.Utf8;
 
-import com.google.common.base.Preconditions;
-
 /**
- * The buffer layout of vectors for a given type
+ * The buffer layout of vectors for a given type.
  * It defines its own buffers followed by the buffers for the children
  * if it is a nested type (Struct_, List, Union)
  */
 public class TypeLayout {
 
+  /**
+   * Constructs a new {@TypeLayout} for the given <code>arrowType</code>.
+   */
   public static TypeLayout getTypeLayout(final ArrowType arrowType) {
     TypeLayout layout = arrowType.accept(new ArrowTypeVisitor<TypeLayout>() {
 
@@ -114,6 +117,15 @@ public class TypeLayout {
       }
 
       @Override
+      public TypeLayout visit(Map type) {
+        List<BufferLayout> vectors = asList(
+            BufferLayout.validityVector(),
+            BufferLayout.offsetBuffer()
+        );
+        return new TypeLayout(vectors);
+      }
+
+      @Override
       public TypeLayout visit(FloatingPoint type) {
         int bitWidth;
         switch (type.getPrecision()) {
@@ -158,7 +170,8 @@ public class TypeLayout {
       }
 
       private TypeLayout newVariableWidthTypeLayout() {
-        return newPrimitiveTypeLayout(BufferLayout.validityVector(), BufferLayout.offsetBuffer(), BufferLayout.byteVector());
+        return newPrimitiveTypeLayout(BufferLayout.validityVector(), BufferLayout.offsetBuffer(),
+          BufferLayout.byteVector());
       }
 
       private TypeLayout newPrimitiveTypeLayout(BufferLayout... vectors) {
@@ -203,6 +216,11 @@ public class TypeLayout {
         }
       }
 
+      @Override
+      public TypeLayout visit(Duration type) {
+            return newFixedWidthTypeLayout(BufferLayout.dataBuffer(64));
+      }
+
     });
     return layout;
   }
@@ -218,11 +236,18 @@ public class TypeLayout {
     this(asList(bufferLayouts));
   }
 
-
+  /**
+   * Returns the individual {@linkplain BufferLayout}s for the given type.
+   */
   public List<BufferLayout> getBufferLayouts() {
     return bufferLayouts;
   }
 
+  /**
+   * Returns the types of each buffer for this layout.  A layout can consist
+   * of multiple buffers for example a validity bitmap buffer, a value buffer or
+   * an offset buffer.
+   */
   public List<BufferType> getBufferTypes() {
     List<BufferType> types = new ArrayList<>(bufferLayouts.size());
     for (BufferLayout vector : bufferLayouts) {

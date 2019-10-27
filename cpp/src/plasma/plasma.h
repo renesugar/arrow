@@ -31,6 +31,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #include "plasma/compat.h"
 
@@ -38,15 +39,16 @@
 #include "arrow/util/logging.h"
 #include "arrow/util/macros.h"
 #include "plasma/common.h"
-#include "plasma/common_generated.h"
 
-#ifdef PLASMA_GPU
-#include "arrow/gpu/cuda_api.h"
-
-using arrow::gpu::CudaIpcMemHandle;
+#ifdef PLASMA_CUDA
+using arrow::cuda::CudaIpcMemHandle;
 #endif
 
 namespace plasma {
+
+namespace flatbuf {
+struct ObjectInfoT;
+}  // namespace flatbuf
 
 #define HANDLE_SIGPIPE(s, fd_)                                              \
   do {                                                                      \
@@ -68,14 +70,29 @@ namespace plasma {
 /// Allocation granularity used in plasma for object allocation.
 constexpr int64_t kBlockSize = 64;
 
-struct Client;
+/// Contains all information that is associated with a Plasma store client.
+struct Client {
+  explicit Client(int fd);
 
-/// Mapping from object IDs to type and status of the request.
-typedef std::unordered_map<ObjectID, ObjectRequest> ObjectRequestMap;
+  /// The file descriptor used to communicate with the client.
+  int fd;
+
+  /// Object ids that are used by this client.
+  std::unordered_set<ObjectID> object_ids;
+
+  /// File descriptors that are used by this client.
+  std::unordered_set<int> used_fds;
+
+  /// The file descriptor used to push notifications to client. This is only valid
+  /// if client subscribes to plasma store. -1 indicates invalid.
+  int notification_fd;
+
+  std::string name = "anonymous_client";
+};
 
 // TODO(pcm): Replace this by the flatbuffers message PlasmaObjectSpec.
 struct PlasmaObject {
-#ifdef PLASMA_GPU
+#ifdef PLASMA_CUDA
   // IPC handle for Cuda.
   std::shared_ptr<CudaIpcMemHandle> ipc_handle;
 #endif
@@ -93,13 +110,16 @@ struct PlasmaObject {
   int64_t metadata_size;
   /// Device number object is on.
   int device_num;
-};
 
-enum class ObjectState : int {
-  /// Object was created but not sealed in the local Plasma Store.
-  PLASMA_CREATED = 1,
-  /// Object is sealed and stored in the local Plasma Store.
-  PLASMA_SEALED
+  bool operator==(const PlasmaObject& other) const {
+    return (
+#ifdef PLASMA_CUDA
+        (ipc_handle == other.ipc_handle) &&
+#endif
+        (store_fd == other.store_fd) && (data_offset == other.data_offset) &&
+        (metadata_offset == other.metadata_offset) && (data_size == other.data_size) &&
+        (metadata_size == other.metadata_size) && (device_num == other.device_num));
+  }
 };
 
 enum class ObjectStatus : int {
@@ -109,47 +129,10 @@ enum class ObjectStatus : int {
   OBJECT_FOUND = 1
 };
 
-/// This type is used by the Plasma store. It is here because it is exposed to
-/// the eviction policy.
-struct ObjectTableEntry {
-  ObjectTableEntry();
-
-  ~ObjectTableEntry();
-
-  /// Memory mapped file containing the object.
-  int fd;
-  /// Device number.
-  int device_num;
-  /// Size of the underlying map.
-  int64_t map_size;
-  /// Offset from the base of the mmap.
-  ptrdiff_t offset;
-  /// Pointer to the object data. Needed to free the object.
-  uint8_t* pointer;
-  /// Size of the object in bytes.
-  int64_t data_size;
-  /// Size of the object metadata in bytes.
-  int64_t metadata_size;
-#ifdef PLASMA_GPU
-  /// IPC GPU handle to share with clients.
-  std::shared_ptr<CudaIpcMemHandle> ipc_handle;
-#endif
-  /// Number of clients currently using this object.
-  int ref_count;
-
-  /// The state of the object, e.g., whether it is open or sealed.
-  ObjectState state;
-  /// The digest of the object. Used to see if two objects are the same.
-  unsigned char digest[kDigestSize];
-};
-
 /// The plasma store information that is exposed to the eviction policy.
 struct PlasmaStoreInfo {
   /// Objects that are in the Plasma store.
-  std::unordered_map<ObjectID, std::unique_ptr<ObjectTableEntry>> objects;
-  /// The amount of memory (in bytes) that we allow to be allocated in the
-  /// store.
-  int64_t memory_capacity;
+  ObjectTable objects;
   /// Boolean flag indicating whether to start the object store with hugepages
   /// support enabled. Huge pages are substantially larger than normal memory
   /// pages (e.g. 2MB or 1GB instead of 4KB) and using them can reduce
@@ -186,6 +169,9 @@ ObjectTableEntry* GetObjectTableEntry(PlasmaStoreInfo* store_info,
 int WarnIfSigpipe(int status, int client_sock);
 
 std::unique_ptr<uint8_t[]> CreateObjectInfoBuffer(flatbuf::ObjectInfoT* object_info);
+
+std::unique_ptr<uint8_t[]> CreatePlasmaNotificationBuffer(
+    std::vector<flatbuf::ObjectInfoT>& object_info);
 
 }  // namespace plasma
 

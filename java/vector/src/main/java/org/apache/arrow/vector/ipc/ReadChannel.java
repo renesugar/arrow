@@ -1,13 +1,12 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -27,6 +26,9 @@ import org.slf4j.LoggerFactory;
 
 import io.netty.buffer.ArrowBuf;
 
+/**
+ * Adapter around {@link ReadableByteChannel} that reads into {@linkplain ArrowBuf}s.
+ */
 public class ReadChannel implements AutoCloseable {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(ReadChannel.class);
@@ -51,7 +53,7 @@ public class ReadChannel implements AutoCloseable {
    * @throws IOException if nit enough bytes left to read
    */
   public int readFully(ByteBuffer buffer) throws IOException {
-    LOGGER.debug("Reading buffer with size: " + buffer.remaining());
+    LOGGER.debug("Reading buffer with size: {}", buffer.remaining());
     int totalRead = 0;
     while (buffer.remaining() != 0) {
       int read = in.read(buffer);

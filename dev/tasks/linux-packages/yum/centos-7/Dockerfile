@@ -15,7 +15,10 @@
 # specific language governing permissions and limitations
 # under the License.
 
-FROM centos:7
+ARG FROM=centos:7
+FROM ${FROM}
+
+COPY qemu-* /usr/bin/
 
 ARG DEBUG
 
@@ -26,17 +29,29 @@ RUN \
   yum groupinstall -y ${quiet} "Development Tools" && \
   yum install -y ${quiet} \
     autoconf-archive \
-    boost-devel \
+    bison \
+    boost169-devel \
+    brotli-devel \
+    bzip2-devel \
     cmake3 \
+    double-conversion-devel \
+    flex \
+    gflags-devel \
     git \
+    glog-devel \
     gobject-introspection-devel \
     gtk-doc \
-    jemalloc-devel \
+    libzstd-devel \
+    lz4-devel \
     pkg-config \
-    python34 \
-    python34-devel \
-    python34-numpy \
+    python36 \
+    python36-devel \
+    python36-numpy \
+    rapidjson-devel \
     rpm-build \
     rpmdevtools \
-    tar && \
+    snappy-devel \
+    tar \
+    thrift-devel \
+    zlib-devel && \
   yum clean ${quiet} all

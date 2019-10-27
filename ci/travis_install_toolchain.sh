@@ -22,27 +22,18 @@ source $TRAVIS_BUILD_DIR/ci/travis_env_common.sh
 source $TRAVIS_BUILD_DIR/ci/travis_install_conda.sh
 
 if [ ! -e $CPP_TOOLCHAIN ]; then
-    # Set up C++ toolchain from conda-forge packages for faster builds
-    conda create -y -q -p $CPP_TOOLCHAIN python=3.6 \
-        nomkl \
-        boost-cpp \
-        libprotobuf \
-        rapidjson \
-        flatbuffers \
-        gflags \
-        gtest \
-        lz4-c \
-        snappy \
-        ccache \
-        zstd \
-        brotli \
-        zlib \
-        cmake \
-        curl \
-        thrift-cpp=0.11.0 \
-        ninja
+    CONDA_PACKAGES=""
 
-    # HACK(wesm): We started experiencing OpenSSL failures when Miniconda was
-    # updated sometime on October 2 or October 3
-    conda update -y -q -p $CPP_TOOLCHAIN ca-certificates -c defaults
+    if [ "$ARROW_TRAVIS_GANDIVA" == "1" ]; then
+        CONDA_PACKAGES="$CONDA_PACKAGES --file=$TRAVIS_BUILD_DIR/ci/conda_env_gandiva.yml"
+    fi
+
+    # Set up C++ toolchain from conda-forge packages for faster builds
+    time conda create -y -q -p $CPP_TOOLCHAIN \
+        --file=$TRAVIS_BUILD_DIR/ci/conda_env_cpp.yml \
+        --file=$TRAVIS_BUILD_DIR/ci/conda_env_unix.yml \
+        $CONDA_PACKAGES \
+        compilers \
+        nomkl \
+        python=3.6
 fi

@@ -23,10 +23,10 @@ sources = files(
   'basic-data-type.cpp',
   'buffer.cpp',
   'chunked-array.cpp',
-  'column.cpp',
+  'codec.cpp',
   'composite-array.cpp',
   'composite-data-type.cpp',
-  'decimal.cpp',
+  'decimal128.cpp',
   'error.cpp',
   'field.cpp',
   'record-batch.cpp',
@@ -43,8 +43,8 @@ sources += files(
   'input-stream.cpp',
   'output-stream.cpp',
   'readable.cpp',
-  'writeable.cpp',
-  'writeable-file.cpp',
+  'writable.cpp',
+  'writable-file.cpp',
 )
 
 sources += files(
@@ -57,7 +57,7 @@ sources += files(
   'compute.cpp',
 )
 
-if arrow_orc_dependency.found()
+if have_arrow_orc
   sources += files(
     'orc-file-reader.cpp',
   )
@@ -71,11 +71,11 @@ c_headers = files(
   'basic-data-type.h',
   'buffer.h',
   'chunked-array.h',
-  'column.h',
+  'codec.h',
   'composite-array.h',
   'composite-data-type.h',
   'data-type.h',
-  'decimal.h',
+  'decimal128.h',
   'error.h',
   'field.h',
   'gobject-type.h',
@@ -94,8 +94,8 @@ c_headers += files(
   'input-stream.h',
   'output-stream.h',
   'readable.h',
-  'writeable.h',
-  'writeable-file.h',
+  'writable.h',
+  'writable-file.h',
 )
 
 c_headers += files(
@@ -108,7 +108,7 @@ c_headers += files(
   'compute.h',
 )
 
-if arrow_orc_dependency.found()
+if have_arrow_orc
   c_headers += files(
     'orc-file-reader.h',
   )
@@ -123,9 +123,9 @@ cpp_headers = files(
   'basic-data-type.hpp',
   'buffer.hpp',
   'chunked-array.hpp',
-  'column.hpp',
+  'codec.hpp',
   'data-type.hpp',
-  'decimal.hpp',
+  'decimal128.hpp',
   'error.hpp',
   'field.hpp',
   'record-batch.hpp',
@@ -142,8 +142,8 @@ cpp_headers += files(
   'input-stream.hpp',
   'output-stream.hpp',
   'readable.hpp',
-  'writeable.hpp',
-  'writeable-file.hpp',
+  'writable.hpp',
+  'writable-file.hpp',
 )
 
 cpp_headers += files(
@@ -156,11 +156,15 @@ cpp_headers += files(
   'compute.hpp',
 )
 
-if arrow_orc_dependency.found()
+if have_arrow_orc
   cpp_headers += files(
     'orc-file-reader.hpp',
   )
 endif
+
+cpp_internal_headers = files(
+  'internal-index.hpp',
+)
 
 version_h_conf = configuration_data()
 version_h_conf.set('GARROW_VERSION_MAJOR', version_major)
@@ -189,7 +193,7 @@ install_headers(headers, subdir: meson.project_name())
 
 
 dependencies = [
-  dependency('arrow'),
+  arrow,
   dependency('gobject-2.0'),
   dependency('gio-2.0'),
 ]
@@ -197,25 +201,21 @@ libarrow_glib = library('arrow-glib',
                         sources: sources + enums,
                         install: true,
                         dependencies: dependencies,
-                        include_directories: [
-                          root_inc,
-                        ],
-                       soversion: so_version,
-                       version: library_version)
-libarrow_glib_dependency = declare_dependency(link_with: libarrow_glib,
-                                              include_directories: [
-                                                root_inc,
-                                              ],
-                                              dependencies: dependencies,
-                                              sources: enums_header)
+                        include_directories: base_include_directories,
+                        soversion: so_version,
+                        version: library_version)
+arrow_glib = declare_dependency(link_with: libarrow_glib,
+                                include_directories: base_include_directories,
+                                dependencies: dependencies,
+                                sources: enums_header)
 
-pkgconfig.generate(filebase: meson.project_name(),
+pkgconfig.generate(libarrow_glib,
+                   filebase: meson.project_name(),
                    name: 'Apache Arrow GLib',
                    description: 'C API for Apache Arrow based on GLib',
                    version: version,
-                   requires: ['gio-2.0', 'arrow'],
-                   libraries: [libarrow_glib])
-if arrow_orc_dependency.found()
+                   requires: ['gio-2.0', 'arrow'])
+if have_arrow_orc
   pkgconfig.generate(filebase: 'arrow-orc-glib',
                      name: 'Apache Arrow GLib ORC',
                      description: 'ORC modules for Apache Arrow GLib',
@@ -238,4 +238,3 @@ arrow_glib_gir = gnome.generate_gir(libarrow_glib,
                                     extra_args: [
                                       '--warn-all',
                                     ])
-arrow_glib_gir_dependency = declare_dependency(sources: arrow_glib_gir)

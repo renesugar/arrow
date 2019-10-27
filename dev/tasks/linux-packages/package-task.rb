@@ -22,7 +22,7 @@ require "time"
 class PackageTask
   include Rake::DSL
 
-  def initialize(package, version, release_time)
+  def initialize(package, version, release_time, options={})
     @package = package
     @version = version
     @release_time = release_time
@@ -33,12 +33,19 @@ class PackageTask
 
     @rpm_package = @package
     case @version
-    when /-((?:dev|rc)\d+)\z/
+    when /-((dev|rc)\d+)\z/
       base_version = $PREMATCH
       sub_version = $1
-      @deb_upstream_version = "#{base_version}~#{sub_version}"
-      @rpm_version = base_version
-      @rpm_release = "0.#{sub_version}"
+      type = $2
+      if type == "rc" and options[:rc_build_type] == :release
+        @deb_upstream_version = base_version
+        @rpm_version = base_version
+        @rpm_release = "1"
+      else
+        @deb_upstream_version = "#{base_version}~#{sub_version}"
+        @rpm_version = base_version
+        @rpm_release = "0.#{sub_version}"
+      end
     else
       @deb_upstream_version = @version
       @rpm_version = @version
@@ -103,7 +110,9 @@ class PackageTask
     absolute_output_path
   end
 
-  def run_docker(id)
+  def run_docker(os, architecture=nil)
+    id = os
+    id = "#{id}-#{architecture}" if architecture
     docker_tag = "#{@package}-#{id}"
     build_command_line = [
       "docker",
@@ -121,7 +130,16 @@ class PackageTask
       build_command_line.concat(["--build-arg", "DEBUG=yes"])
       run_command_line.concat(["--env", "DEBUG=yes"])
     end
-    build_command_line << id
+    if File.exist?(File.join(id, "Dockerfile"))
+      docker_context = id
+    else
+      from = File.readlines(File.join(id, "from")).find do |line|
+        /^[a-z]/i =~ line
+      end
+      build_command_line.concat(["--build-arg", "FROM=#{from.chomp}"])
+      docker_context = os
+    end
+    build_command_line << docker_context
     run_command_line.concat([docker_tag, "/host/build.sh"])
 
     sh(*build_command_line)
@@ -136,7 +154,6 @@ class PackageTask
 
   def define_yum_task
     namespace :yum do
-      distribution = "centos"
       yum_dir = "yum"
       repositories_dir = "#{yum_dir}/repositories"
 
@@ -161,9 +178,7 @@ RELEASE=#{@rpm_release}
           ENV
         end
 
-        tmp_distribution_dir = "#{tmp_dir}/#{distribution}"
-        mkdir_p(tmp_distribution_dir)
-        spec = "#{tmp_distribution_dir}/#{@rpm_package}.spec"
+        spec = "#{tmp_dir}/#{@rpm_package}.spec"
         spec_in = "#{yum_dir}/#{@rpm_package}.spec.in"
         spec_in_data = File.read(spec_in)
         spec_data = spec_in_data.gsub(/@(.+?)@/) do |matched|
@@ -183,16 +198,29 @@ RELEASE=#{@rpm_release}
         end
 
         cd(yum_dir) do
-          distribution_versions = (ENV["CENTOS_VERSIONS"] || "6,7").split(",")
           threads = []
-          distribution_versions.each do |version|
-            id = "#{distribution}-#{version}"
+          targets = (ENV["YUM_TARGETS"] || "").split(",")
+          if targets.empty?
+            # Disable aarch64 targets by default for now
+            # because they require some setups on host.
+            targets = [
+              "centos-6",
+              "centos-7",
+              # "centos-7-aarch64",
+              "centos-8",
+              # "centos-8-aarch64",
+            ]
+          end
+          targets.each do |target|
+            next unless Dir.exist?(target)
+            distribution, version, architecture = target.split("-", 3)
+            os = "#{distribution}-#{version}"
             if parallel_build?
-              threads << Thread.new(id) do |local_id|
-                run_docker(local_id)
+              threads << Thread.new(os, architecture) do |*local_values|
+                run_docker(*local_values)
               end
             else
-              run_docker(id)
+              run_docker(os, architecture)
             end
           end
           threads.each(&:join)
@@ -238,22 +266,31 @@ VERSION=#{@deb_upstream_version}
           threads = []
           targets = (ENV["APT_TARGETS"] || "").split(",")
           if targets.empty?
+            # Disable arm64 targets by default for now
+            # because they require some setups on host.
             targets = [
               "debian-stretch",
-              "ubuntu-trusty",
+              # "debian-stretch-arm64",
+              "debian-buster",
+              # "debian-stretch-arm64",
               "ubuntu-xenial",
+              # "ubuntu-xenial-arm64",
               "ubuntu-bionic",
+              # "ubuntu-bionic-arm64",
+              "ubuntu-disco",
+              # "ubuntu-disco-arm64",
             ]
           end
           targets.each do |target|
             next unless Dir.exist?(target)
-            id = target
+            distribution, version, architecture = target.split("-", 3)
+            os = "#{distribution}-#{version}"
             if parallel_build?
-              threads << Thread.new(id) do |local_id|
-                run_docker(local_id)
+              threads << Thread.new(os, architecture) do |*local_values|
+                run_docker(*local_values)
               end
             else
-              run_docker(id)
+              run_docker(os, architecture)
             end
           end
           threads.each(&:join)
@@ -283,11 +320,23 @@ VERSION=#{@deb_upstream_version}
   end
 
   def packager_name
-    ENV["DEBFULLNAME"] || ENV["NAME"] || `git config --get user.name`.chomp
+    ENV["DEBFULLNAME"] || ENV["NAME"] || guess_packager_name_from_git
+  end
+
+  def guess_packager_name_from_git
+    name = `git config --get user.name`.chomp
+    return name unless name.empty?
+    `git log -n 1 --format=%aN`.chomp
   end
 
   def packager_email
-    ENV["DEBEMAIL"] || ENV["EMAIL"] || `git config --get user.email`.chomp
+    ENV["DEBEMAIL"] || ENV["EMAIL"] || guess_packager_email_from_git
+  end
+
+  def guess_packager_email_from_git
+    email = `git config --get user.email`.chomp
+    return email unless email.empty?
+    `git log -n 1 --format=%aE`.chomp
   end
 
   def update_content(path)
@@ -331,5 +380,4 @@ VERSION=#{@deb_upstream_version}
       content.rstrip
     end
   end
-
 end

@@ -1,13 +1,12 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -27,14 +26,18 @@ import java.util.List;
 import org.apache.arrow.flatbuf.Footer;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.ipc.message.ArrowBlock;
-import org.apache.arrow.vector.ipc.message.ArrowFooter;
 import org.apache.arrow.vector.ipc.message.ArrowDictionaryBatch;
+import org.apache.arrow.vector.ipc.message.ArrowFooter;
 import org.apache.arrow.vector.ipc.message.ArrowRecordBatch;
 import org.apache.arrow.vector.ipc.message.MessageSerializer;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * An implementation of {@link ArrowReader} that reads the standard arrow binary
+ * file format.
+ */
 public class ArrowFileReader extends ArrowReader {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(ArrowFileReader.class);
@@ -83,7 +86,7 @@ public class ArrowFileReader extends ArrowReader {
         throw new InvalidArrowFileException("invalid footer length: " + footerLength);
       }
       long footerOffset = footerLengthOffset - footerLength;
-      LOGGER.debug(String.format("Footer starts at %d, length: %d", footerOffset, footerLength));
+      LOGGER.debug("Footer starts at {}, length: {}", footerOffset, footerLength);
       ByteBuffer footerBuffer = ByteBuffer.allocate(footerLength);
       in.setPosition(footerOffset);
       in.readFully(footerBuffer);
@@ -95,6 +98,27 @@ public class ArrowFileReader extends ArrowReader {
   }
 
   @Override
+  public void initialize() throws IOException {
+    super.initialize();
+
+    // empty stream, has no dictionaries in IPC.
+    if (footer.getRecordBatches().size() == 0) {
+      return;
+    }
+    // Read and load all dictionaries from schema
+    for (int i = 0; i < dictionaries.size(); i++) {
+      ArrowDictionaryBatch dictionaryBatch = readDictionary();
+      loadDictionary(dictionaryBatch);
+    }
+  }
+
+  /**
+   * Read a dictionary batch from the source, will be invoked after the schema has been read and
+   * called N times, where N is the number of dictionaries indicated by the schema Fields.
+   *
+   * @return the read ArrowDictionaryBatch
+   * @throws IOException on error
+   */
   public ArrowDictionaryBatch readDictionary() throws IOException {
     if (currentDictionaryBatch >= footer.getDictionaries().size()) {
       throw new IOException("Requested more dictionaries than defined in footer: " + currentDictionaryBatch);
@@ -103,7 +127,7 @@ public class ArrowFileReader extends ArrowReader {
     return readDictionaryBatch(in, block, allocator);
   }
 
-  // Returns true if a batch was read, false if no more batches
+  /** Returns true if a batch was read, false if no more batches. */
   @Override
   public boolean loadNextBatch() throws IOException {
     prepareLoadNextBatch();
@@ -124,16 +148,22 @@ public class ArrowFileReader extends ArrowReader {
     return footer.getDictionaries();
   }
 
+  /**
+   * Returns the {@link ArrowBlock} metadata from the file.
+   */
   public List<ArrowBlock> getRecordBlocks() throws IOException {
     ensureInitialized();
     return footer.getRecordBatches();
   }
 
+  /**
+   * Loads record batch for the given block.
+   */
   public boolean loadRecordBatch(ArrowBlock block) throws IOException {
     ensureInitialized();
     int blockIndex = footer.getRecordBatches().indexOf(block);
     if (blockIndex == -1) {
-      throw new IllegalArgumentException("Arrow bock does not exist in record batches: " + block);
+      throw new IllegalArgumentException("Arrow block does not exist in record batches: " + block);
     }
     currentRecordBatch = blockIndex;
     return loadNextBatch();
@@ -142,8 +172,8 @@ public class ArrowFileReader extends ArrowReader {
   private ArrowDictionaryBatch readDictionaryBatch(SeekableReadChannel in,
                                                    ArrowBlock block,
                                                    BufferAllocator allocator) throws IOException {
-    LOGGER.debug(String.format("DictionaryRecordBatch at %d, metadata: %d, body: %d",
-        block.getOffset(), block.getMetadataLength(), block.getBodyLength()));
+    LOGGER.debug("DictionaryRecordBatch at {}, metadata: {}, body: {}",
+        block.getOffset(), block.getMetadataLength(), block.getBodyLength());
     in.setPosition(block.getOffset());
     ArrowDictionaryBatch batch = MessageSerializer.deserializeDictionaryBatch(in, block, allocator);
     if (batch == null) {
@@ -155,9 +185,9 @@ public class ArrowFileReader extends ArrowReader {
   private ArrowRecordBatch readRecordBatch(SeekableReadChannel in,
                                            ArrowBlock block,
                                            BufferAllocator allocator) throws IOException {
-    LOGGER.debug(String.format("RecordBatch at %d, metadata: %d, body: %d",
+    LOGGER.debug("RecordBatch at {}, metadata: {}, body: {}",
         block.getOffset(), block.getMetadataLength(),
-        block.getBodyLength()));
+        block.getBodyLength());
     in.setPosition(block.getOffset());
     ArrowRecordBatch batch = MessageSerializer.deserializeRecordBatch(in, block, allocator);
     if (batch == null) {

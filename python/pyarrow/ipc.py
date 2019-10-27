@@ -17,6 +17,8 @@
 
 # Arrow file and stream reader/writer classes, and other messaging tools
 
+from __future__ import absolute_import
+
 import pyarrow as pa
 
 from pyarrow.lib import (Message, MessageReader,  # noqa
@@ -24,7 +26,6 @@ from pyarrow.lib import (Message, MessageReader,  # noqa
                          read_tensor, write_tensor,
                          get_record_batch_size, get_tensor_size)
 import pyarrow.lib as lib
-from .util import _deprecate_nthreads
 
 
 class _ReadPandasOption(object):
@@ -46,7 +47,7 @@ class _ReadPandasOption(object):
         return table.to_pandas(**options)
 
 
-class RecordBatchStreamReader(lib._RecordBatchReader, _ReadPandasOption):
+class RecordBatchStreamReader(lib._RecordBatchStreamReader, _ReadPandasOption):
     """
     Reader for the Arrow streaming binary format
 
@@ -55,23 +56,31 @@ class RecordBatchStreamReader(lib._RecordBatchReader, _ReadPandasOption):
     source : bytes/buffer-like, pyarrow.NativeFile, or file-like Python object
         Either an in-memory buffer, or a readable file object
     """
+
     def __init__(self, source):
         self._open(source)
 
 
-class RecordBatchStreamWriter(lib._RecordBatchWriter):
-    """
-    Writer for the Arrow streaming binary format
+_ipc_writer_class_doc = """\
+Parameters
+----------
+sink : str, pyarrow.NativeFile, or file-like Python object
+    Either a file path, or a writable file object
+schema : pyarrow.Schema
+    The Arrow schema for data to be written to the file
+use_legacy_format : boolean, default None
+    If None, use True unless overridden by ARROW_PRE_0_15_IPC_FORMAT=1
+    environment variable"""
 
-    Parameters
-    ----------
-    sink : str, pyarrow.NativeFile, or file-like Python object
-        Either a file path, or a writable file object
-    schema : pyarrow.Schema
-        The Arrow schema for data to be written to the file
-    """
-    def __init__(self, sink, schema):
-        self._open(sink, schema)
+
+class RecordBatchStreamWriter(lib._RecordBatchStreamWriter):
+    __doc__ = """Writer for the Arrow streaming binary format
+
+{}""".format(_ipc_writer_class_doc)
+
+    def __init__(self, sink, schema, use_legacy_format=None):
+        use_legacy_format = _get_legacy_format_default(use_legacy_format)
+        self._open(sink, schema, use_legacy_format=use_legacy_format)
 
 
 class RecordBatchFileReader(lib._RecordBatchFileReader, _ReadPandasOption):
@@ -91,18 +100,22 @@ class RecordBatchFileReader(lib._RecordBatchFileReader, _ReadPandasOption):
 
 
 class RecordBatchFileWriter(lib._RecordBatchFileWriter):
-    """
-    Writer to create the Arrow binary file format
 
-    Parameters
-    ----------
-    sink : str, pyarrow.NativeFile, or file-like Python object
-        Either a file path, or a writable file object
-    schema : pyarrow.Schema
-        The Arrow schema for data to be written to the file
-    """
-    def __init__(self, sink, schema):
-        self._open(sink, schema)
+    __doc__ = """Writer to create the Arrow binary file format
+
+{}""".format(_ipc_writer_class_doc)
+
+    def __init__(self, sink, schema, use_legacy_format=None):
+        use_legacy_format = _get_legacy_format_default(use_legacy_format)
+        self._open(sink, schema, use_legacy_format=use_legacy_format)
+
+
+def _get_legacy_format_default(use_legacy_format):
+    if use_legacy_format is None:
+        import os
+        return bool(int(os.environ.get('ARROW_PRE_0_15_IPC_FORMAT', '0')))
+    else:
+        return use_legacy_format
 
 
 def open_stream(source):
@@ -143,7 +156,7 @@ def open_file(source, footer_offset=None):
     return RecordBatchFileReader(source, footer_offset=footer_offset)
 
 
-def serialize_pandas(df, nthreads=None, preserve_index=True):
+def serialize_pandas(df, nthreads=None, preserve_index=None):
     """Serialize a pandas DataFrame into a buffer protocol compatible object.
 
     Parameters
@@ -151,9 +164,11 @@ def serialize_pandas(df, nthreads=None, preserve_index=True):
     df : pandas.DataFrame
     nthreads : int, default None
         Number of threads to use for conversion to Arrow, default all CPUs
-    preserve_index : boolean, default True
-        If True, preserve the pandas index data, otherwise the result will have
-        a default RangeIndex
+    preserve_index : boolean, default None
+        The default of None will store the index as a column, except for
+        RangeIndex which is stored as metadata only. If True, always
+        preserve the pandas index data as a column. If False, no index
+        information is saved and the result will have a default RangeIndex.
 
     Returns
     -------
@@ -163,29 +178,26 @@ def serialize_pandas(df, nthreads=None, preserve_index=True):
     batch = pa.RecordBatch.from_pandas(df, nthreads=nthreads,
                                        preserve_index=preserve_index)
     sink = pa.BufferOutputStream()
-    writer = pa.RecordBatchStreamWriter(sink, batch.schema)
-    writer.write_batch(batch)
-    writer.close()
-    return sink.get_result()
+    with pa.RecordBatchStreamWriter(sink, batch.schema) as writer:
+        writer.write_batch(batch)
+    return sink.getvalue()
 
 
-def deserialize_pandas(buf, nthreads=None, use_threads=False):
+def deserialize_pandas(buf, use_threads=True):
     """Deserialize a buffer protocol compatible object into a pandas DataFrame.
 
     Parameters
     ----------
     buf : buffer
         An object compatible with the buffer protocol
-    use_threads: boolean, default False
+    use_threads: boolean, default True
         Whether to parallelize the conversion using multiple threads
 
     Returns
     -------
     df : pandas.DataFrame
     """
-    use_threads = _deprecate_nthreads(use_threads, nthreads)
-
     buffer_reader = pa.BufferReader(buf)
-    reader = pa.RecordBatchStreamReader(buffer_reader)
-    table = reader.read_all()
+    with pa.RecordBatchStreamReader(buffer_reader) as reader:
+        table = reader.read_all()
     return table.to_pandas(use_threads=use_threads)

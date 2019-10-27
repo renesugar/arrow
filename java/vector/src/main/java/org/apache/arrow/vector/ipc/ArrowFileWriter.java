@@ -1,13 +1,12 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -23,17 +22,21 @@ import java.nio.channels.WritableByteChannel;
 import java.util.ArrayList;
 import java.util.List;
 
-import com.google.common.annotations.VisibleForTesting;
-
+import org.apache.arrow.util.VisibleForTesting;
 import org.apache.arrow.vector.VectorSchemaRoot;
 import org.apache.arrow.vector.dictionary.DictionaryProvider;
 import org.apache.arrow.vector.ipc.message.ArrowBlock;
 import org.apache.arrow.vector.ipc.message.ArrowDictionaryBatch;
 import org.apache.arrow.vector.ipc.message.ArrowFooter;
 import org.apache.arrow.vector.ipc.message.ArrowRecordBatch;
+import org.apache.arrow.vector.ipc.message.IpcOption;
+import org.apache.arrow.vector.ipc.message.MessageSerializer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * {@link ArrowWriter} that writes out a Arrow files (https://arrow.apache.org/docs/format/IPC.html#file-format).
+ */
 public class ArrowFileWriter extends ArrowWriter {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(ArrowFileWriter.class);
@@ -44,6 +47,11 @@ public class ArrowFileWriter extends ArrowWriter {
 
   public ArrowFileWriter(VectorSchemaRoot root, DictionaryProvider provider, WritableByteChannel out) {
     super(root, provider, out);
+  }
+
+  public ArrowFileWriter(VectorSchemaRoot root, DictionaryProvider provider, WritableByteChannel out,
+      IpcOption option) {
+    super(root, provider, out, option);
   }
 
   @Override
@@ -67,6 +75,11 @@ public class ArrowFileWriter extends ArrowWriter {
 
   @Override
   protected void endInternal(WriteChannel out) throws IOException {
+    if (!option.write_legacy_ipc_format) {
+      out.writeIntLittleEndian(MessageSerializer.IPC_CONTINUATION_TOKEN);
+    }
+    out.writeIntLittleEndian(0);
+
     long footerStart = out.getCurrentPosition();
     out.write(new ArrowFooter(schema, dictionaryBlocks, recordBlocks), false);
     int footerLength = (int) (out.getCurrentPosition() - footerStart);
@@ -74,9 +87,9 @@ public class ArrowFileWriter extends ArrowWriter {
       throw new InvalidArrowFileException("invalid footer");
     }
     out.writeIntLittleEndian(footerLength);
-    LOGGER.debug(String.format("Footer starts at %d, length: %d", footerStart, footerLength));
+    LOGGER.debug("Footer starts at {}, length: {}", footerStart, footerLength);
     ArrowMagic.writeMagic(out, false);
-    LOGGER.debug(String.format("magic written, now at %d", out.getCurrentPosition()));
+    LOGGER.debug("magic written, now at {}", out.getCurrentPosition());
   }
 
   @VisibleForTesting

@@ -15,7 +15,26 @@
 # specific language governing permissions and limitations
 # under the License.
 
-install(FILES
-  cast.h
-  hash.h
-  DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/arrow/compute/kernels")
+arrow_install_all_headers("arrow/compute/kernels")
+
+add_arrow_test(boolean_test PREFIX "arrow-compute")
+add_arrow_test(cast_test PREFIX "arrow-compute")
+add_arrow_test(hash_test PREFIX "arrow-compute")
+add_arrow_test(isin_test PREFIX "arrow-compute")
+add_arrow_test(sort_to_indices_test PREFIX "arrow-compute")
+add_arrow_test(util_internal_test PREFIX "arrow-compute")
+add_arrow_benchmark(sort_to_indices_benchmark PREFIX "arrow-compute")
+
+# Aggregates
+add_arrow_test(aggregate_test PREFIX "arrow-compute")
+add_arrow_benchmark(aggregate_benchmark PREFIX "arrow-compute")
+
+# Comparison
+add_arrow_test(compare_test PREFIX "arrow-compute")
+add_arrow_benchmark(compare_benchmark PREFIX "arrow-compute")
+
+# Selection
+add_arrow_test(take_test PREFIX "arrow-compute")
+add_arrow_test(filter_test PREFIX "arrow-compute")
+add_arrow_benchmark(filter_benchmark PREFIX "arrow-compute")
+add_arrow_benchmark(take_benchmark PREFIX "arrow-compute")

@@ -15,6 +15,8 @@
 # specific language governing permissions and limitations
 # under the License.
 
+from __future__ import absolute_import
+
 import contextlib
 import os
 import pyarrow as pa
@@ -25,7 +27,9 @@ import tempfile
 import time
 
 from pyarrow._plasma import (ObjectID, ObjectNotAvailable, # noqa
-                             PlasmaBuffer, PlasmaClient, connect)
+                             PlasmaBuffer, PlasmaClient, connect,
+                             PlasmaObjectExists, PlasmaObjectNonexistent,
+                             PlasmaStoreFull)
 
 
 # The Plasma TensorFlow Operator needs to be compiled on the end user's
@@ -39,7 +43,9 @@ TF_PLASMA_OP_PATH = os.path.join(pa.__path__[0], "tensorflow", "plasma_op.so")
 
 tf_plasma_op = None
 
-if os.path.exists(TF_PLASMA_OP_PATH):
+
+def load_plasma_tensorflow_op():
+    global tf_plasma_op
     import tensorflow as tf
     tf_plasma_op = tf.load_op_library(TF_PLASMA_OP_PATH)
 
@@ -76,8 +82,8 @@ def build_plasma_tensorflow_op():
 @contextlib.contextmanager
 def start_plasma_store(plasma_store_memory,
                        use_valgrind=False, use_profiler=False,
-                       use_one_memory_mapped_file=False,
-                       plasma_directory=None, use_hugepages=False):
+                       plasma_directory=None, use_hugepages=False,
+                       external_store=None):
     """Start a plasma store process.
     Args:
         plasma_store_memory (int): Capacity of the plasma store in bytes.
@@ -85,11 +91,10 @@ def start_plasma_store(plasma_store_memory,
             of valgrind. If this is True, use_profiler must be False.
         use_profiler (bool): True if the plasma store should be started inside
             a profiler. If this is True, use_valgrind must be False.
-        use_one_memory_mapped_file: If True, then the store will use only a
-            single memory-mapped file.
         plasma_directory (str): Directory where plasma memory mapped files
             will be stored.
         use_hugepages (bool): True if the plasma store should use huge pages.
+        external_store (str): External store to use for evicted objects.
     Return:
         A tuple of the name of the plasma store socket and the process ID of
             the plasma store process.
@@ -101,16 +106,16 @@ def start_plasma_store(plasma_store_memory,
     try:
         plasma_store_name = os.path.join(tmpdir, 'plasma.sock')
         plasma_store_executable = os.path.join(
-            pa.__path__[0], "plasma_store_server")
+            pa.__path__[0], "plasma-store-server")
         command = [plasma_store_executable,
                    "-s", plasma_store_name,
                    "-m", str(plasma_store_memory)]
-        if use_one_memory_mapped_file:
-            command += ["-f"]
         if plasma_directory:
             command += ["-d", plasma_directory]
         if use_hugepages:
             command += ["-h"]
+        if external_store is not None:
+            command += ["-e", external_store]
         stdout_file = None
         stderr_file = None
         if use_valgrind:

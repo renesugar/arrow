@@ -1,14 +1,13 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -205,7 +204,7 @@ public class Table {
     this.rowCount = rowCount;
   }
 
-  private byte[][] getByteArray(String[] data) {
+  static byte[][] getByteArray(String[] data) {
     byte[][] byteArr = new byte[data.length][];
 
     for (int i = 0; i < data.length; i++) {
@@ -214,7 +213,7 @@ public class Table {
     return byteArr;
   }
 
-  private byte[][] getHexToByteArray(String[] data) {
+  static byte[][] getHexToByteArray(String[] data) {
     byte[][] byteArr = new byte[data.length][];
 
     for (int i = 0; i < data.length; i++) {
@@ -223,12 +222,12 @@ public class Table {
     return byteArr;
   }
 
-  private static byte[] hexStringToByteArray(String s) {
+  static byte[] hexStringToByteArray(String s) {
     int len = s.length();
     byte[] data = new byte[len / 2];
     for (int i = 0; i < len; i += 2) {
-      data[i / 2] = (byte) ((Character.digit(s.charAt(i), 16) << 4)
-              + Character.digit(s.charAt(i + 1), 16));
+      data[i / 2] = (byte) ((Character.digit(s.charAt(i), 16) << 4) +
+              Character.digit(s.charAt(i + 1), 16));
     }
     return data;
   }

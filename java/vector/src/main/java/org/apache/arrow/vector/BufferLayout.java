@@ -1,13 +1,12 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,17 +17,25 @@
 
 package org.apache.arrow.vector;
 
-import com.google.common.base.Preconditions;
+import org.apache.arrow.util.Preconditions;
 
+/**
+ * Metadata class that captures the "type" of an Arrow buffer.
+ * (e.g. data buffers, offset buffers for variable width types and validity
+ * buffers).
+ */
 public class BufferLayout {
 
+  /**
+   * Enumeration of the different logical types a buffer can have.
+   */
   public enum BufferType {
     DATA("DATA"),
     OFFSET("OFFSET"),
     VALIDITY("VALIDITY"),
     TYPE("TYPE");
 
-    final private String name;
+    private final String name;
 
     BufferType(String name) {
       this.name = name;
@@ -57,6 +64,10 @@ public class BufferLayout {
     return OFFSET_BUFFER;
   }
 
+  /**
+   * Returns a databuffer for the given bitwidth.  Only supports powers of two between 8 and 128
+   * inclusive.
+   */
   public static BufferLayout dataBuffer(int typeBitWidth) {
     switch (typeBitWidth) {
       case 8:

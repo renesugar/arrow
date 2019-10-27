@@ -17,6 +17,9 @@
 package array
 
 import (
+	"bytes"
+	"fmt"
+	"strings"
 	"unsafe"
 
 	"github.com/apache/arrow/go/arrow"
@@ -38,7 +41,13 @@ func NewBinaryData(data *Data) *Binary {
 }
 
 // Value returns the slice at index i. This value should not be mutated.
-func (a *Binary) Value(i int) []byte { return a.valueBytes[a.valueOffsets[i]:a.valueOffsets[i+1]] }
+func (a *Binary) Value(i int) []byte {
+	if i < 0 || i >= a.array.data.length {
+		panic("arrow/array: index out of range")
+	}
+	idx := a.array.data.offset + i
+	return a.valueBytes[a.valueOffsets[idx]:a.valueOffsets[idx+1]]
+}
 
 // ValueString returns the string at index i without performing additional allocations.
 // The string is only valid for the lifetime of the Binary array.
@@ -47,10 +56,50 @@ func (a *Binary) ValueString(i int) string {
 	return *(*string)(unsafe.Pointer(&b))
 }
 
-func (a *Binary) ValueOffset(i int) int { return int(a.valueOffsets[i]) }
-func (a *Binary) ValueLen(i int) int    { return int(a.valueOffsets[i+1] - a.valueOffsets[i]) }
-func (a *Binary) ValueOffsets() []int32 { return a.valueOffsets }
-func (a *Binary) ValueBytes() []byte    { return a.valueBytes }
+func (a *Binary) ValueOffset(i int) int {
+	if i < 0 || i >= a.array.data.length {
+		panic("arrow/array: index out of range")
+	}
+	return int(a.valueOffsets[a.array.data.offset+i])
+}
+
+func (a *Binary) ValueLen(i int) int {
+	if i < 0 || i >= a.array.data.length {
+		panic("arrow/array: index out of range")
+	}
+	beg := a.array.data.offset + i
+	return int(a.valueOffsets[beg+1] - a.valueOffsets[beg])
+}
+
+func (a *Binary) ValueOffsets() []int32 {
+	beg := a.array.data.offset
+	end := beg + a.array.data.length + 1
+	return a.valueOffsets[beg:end]
+}
+
+func (a *Binary) ValueBytes() []byte {
+	beg := a.array.data.offset
+	end := beg + a.array.data.length
+	return a.valueBytes[a.valueOffsets[beg]:a.valueOffsets[end]]
+}
+
+func (a *Binary) String() string {
+	o := new(strings.Builder)
+	o.WriteString("[")
+	for i := 0; i < a.Len(); i++ {
+		if i > 0 {
+			o.WriteString(" ")
+		}
+		switch {
+		case a.IsNull(i):
+			o.WriteString("(null)")
+		default:
+			fmt.Fprintf(o, "%q", a.ValueString(i))
+		}
+	}
+	o.WriteString("]")
+	return o.String()
+}
 
 func (a *Binary) setData(data *Data) {
 	if len(data.buffers) != 3 {
@@ -67,3 +116,19 @@ func (a *Binary) setData(data *Data) {
 		a.valueOffsets = arrow.Int32Traits.CastFromBytes(valueOffsets.Bytes())
 	}
 }
+
+func arrayEqualBinary(left, right *Binary) bool {
+	for i := 0; i < left.Len(); i++ {
+		if left.IsNull(i) {
+			continue
+		}
+		if bytes.Compare(left.Value(i), right.Value(i)) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+var (
+	_ Interface = (*Binary)(nil)
+)

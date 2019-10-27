@@ -17,8 +17,11 @@
 package array
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/apache/arrow/go/arrow"
-	"github.com/apache/arrow/go/arrow/internal/bitutil"
+	"github.com/apache/arrow/go/arrow/bitutil"
 	"github.com/apache/arrow/go/arrow/memory"
 )
 
@@ -42,7 +45,30 @@ func NewBooleanData(data *Data) *Boolean {
 	return a
 }
 
-func (a *Boolean) Value(i int) bool { return bitutil.BitIsSet(a.values, i) }
+func (a *Boolean) Value(i int) bool {
+	if i < 0 || i >= a.array.data.length {
+		panic("arrow/array: index out of range")
+	}
+	return bitutil.BitIsSet(a.values, a.array.data.offset+i)
+}
+
+func (a *Boolean) String() string {
+	o := new(strings.Builder)
+	o.WriteString("[")
+	for i := 0; i < a.Len(); i++ {
+		if i > 0 {
+			fmt.Fprintf(o, " ")
+		}
+		switch {
+		case a.IsNull(i):
+			o.WriteString("(null)")
+		default:
+			fmt.Fprintf(o, "%v", a.Value(i))
+		}
+	}
+	o.WriteString("]")
+	return o.String()
+}
 
 func (a *Boolean) setData(data *Data) {
 	a.array.setData(data)
@@ -51,3 +77,19 @@ func (a *Boolean) setData(data *Data) {
 		a.values = vals.Bytes()
 	}
 }
+
+func arrayEqualBoolean(left, right *Boolean) bool {
+	for i := 0; i < left.Len(); i++ {
+		if left.IsNull(i) {
+			continue
+		}
+		if left.Value(i) != right.Value(i) {
+			return false
+		}
+	}
+	return true
+}
+
+var (
+	_ Interface = (*Boolean)(nil)
+)

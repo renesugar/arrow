@@ -19,6 +19,9 @@
 package array
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/apache/arrow/go/arrow"
 )
 
@@ -38,6 +41,24 @@ func NewInt64Data(data *Data) *Int64 {
 func (a *Int64) Value(i int) int64    { return a.values[i] }
 func (a *Int64) Int64Values() []int64 { return a.values }
 
+func (a *Int64) String() string {
+	o := new(strings.Builder)
+	o.WriteString("[")
+	for i, v := range a.values {
+		if i > 0 {
+			fmt.Fprintf(o, " ")
+		}
+		switch {
+		case a.IsNull(i):
+			o.WriteString("(null)")
+		default:
+			fmt.Fprintf(o, "%v", v)
+		}
+	}
+	o.WriteString("]")
+	return o.String()
+}
+
 func (a *Int64) setData(data *Data) {
 	a.array.setData(data)
 	vals := data.buffers[1]
@@ -47,6 +68,18 @@ func (a *Int64) setData(data *Data) {
 		end := beg + a.array.data.length
 		a.values = a.values[beg:end]
 	}
+}
+
+func arrayEqualInt64(left, right *Int64) bool {
+	for i := 0; i < left.Len(); i++ {
+		if left.IsNull(i) {
+			continue
+		}
+		if left.Value(i) != right.Value(i) {
+			return false
+		}
+	}
+	return true
 }
 
 // A type which represents an immutable sequence of uint64 values.
@@ -65,6 +98,24 @@ func NewUint64Data(data *Data) *Uint64 {
 func (a *Uint64) Value(i int) uint64     { return a.values[i] }
 func (a *Uint64) Uint64Values() []uint64 { return a.values }
 
+func (a *Uint64) String() string {
+	o := new(strings.Builder)
+	o.WriteString("[")
+	for i, v := range a.values {
+		if i > 0 {
+			fmt.Fprintf(o, " ")
+		}
+		switch {
+		case a.IsNull(i):
+			o.WriteString("(null)")
+		default:
+			fmt.Fprintf(o, "%v", v)
+		}
+	}
+	o.WriteString("]")
+	return o.String()
+}
+
 func (a *Uint64) setData(data *Data) {
 	a.array.setData(data)
 	vals := data.buffers[1]
@@ -74,6 +125,18 @@ func (a *Uint64) setData(data *Data) {
 		end := beg + a.array.data.length
 		a.values = a.values[beg:end]
 	}
+}
+
+func arrayEqualUint64(left, right *Uint64) bool {
+	for i := 0; i < left.Len(); i++ {
+		if left.IsNull(i) {
+			continue
+		}
+		if left.Value(i) != right.Value(i) {
+			return false
+		}
+	}
+	return true
 }
 
 // A type which represents an immutable sequence of float64 values.
@@ -92,6 +155,24 @@ func NewFloat64Data(data *Data) *Float64 {
 func (a *Float64) Value(i int) float64      { return a.values[i] }
 func (a *Float64) Float64Values() []float64 { return a.values }
 
+func (a *Float64) String() string {
+	o := new(strings.Builder)
+	o.WriteString("[")
+	for i, v := range a.values {
+		if i > 0 {
+			fmt.Fprintf(o, " ")
+		}
+		switch {
+		case a.IsNull(i):
+			o.WriteString("(null)")
+		default:
+			fmt.Fprintf(o, "%v", v)
+		}
+	}
+	o.WriteString("]")
+	return o.String()
+}
+
 func (a *Float64) setData(data *Data) {
 	a.array.setData(data)
 	vals := data.buffers[1]
@@ -101,6 +182,18 @@ func (a *Float64) setData(data *Data) {
 		end := beg + a.array.data.length
 		a.values = a.values[beg:end]
 	}
+}
+
+func arrayEqualFloat64(left, right *Float64) bool {
+	for i := 0; i < left.Len(); i++ {
+		if left.IsNull(i) {
+			continue
+		}
+		if left.Value(i) != right.Value(i) {
+			return false
+		}
+	}
+	return true
 }
 
 // A type which represents an immutable sequence of int32 values.
@@ -119,6 +212,24 @@ func NewInt32Data(data *Data) *Int32 {
 func (a *Int32) Value(i int) int32    { return a.values[i] }
 func (a *Int32) Int32Values() []int32 { return a.values }
 
+func (a *Int32) String() string {
+	o := new(strings.Builder)
+	o.WriteString("[")
+	for i, v := range a.values {
+		if i > 0 {
+			fmt.Fprintf(o, " ")
+		}
+		switch {
+		case a.IsNull(i):
+			o.WriteString("(null)")
+		default:
+			fmt.Fprintf(o, "%v", v)
+		}
+	}
+	o.WriteString("]")
+	return o.String()
+}
+
 func (a *Int32) setData(data *Data) {
 	a.array.setData(data)
 	vals := data.buffers[1]
@@ -128,6 +239,18 @@ func (a *Int32) setData(data *Data) {
 		end := beg + a.array.data.length
 		a.values = a.values[beg:end]
 	}
+}
+
+func arrayEqualInt32(left, right *Int32) bool {
+	for i := 0; i < left.Len(); i++ {
+		if left.IsNull(i) {
+			continue
+		}
+		if left.Value(i) != right.Value(i) {
+			return false
+		}
+	}
+	return true
 }
 
 // A type which represents an immutable sequence of uint32 values.
@@ -146,6 +269,24 @@ func NewUint32Data(data *Data) *Uint32 {
 func (a *Uint32) Value(i int) uint32     { return a.values[i] }
 func (a *Uint32) Uint32Values() []uint32 { return a.values }
 
+func (a *Uint32) String() string {
+	o := new(strings.Builder)
+	o.WriteString("[")
+	for i, v := range a.values {
+		if i > 0 {
+			fmt.Fprintf(o, " ")
+		}
+		switch {
+		case a.IsNull(i):
+			o.WriteString("(null)")
+		default:
+			fmt.Fprintf(o, "%v", v)
+		}
+	}
+	o.WriteString("]")
+	return o.String()
+}
+
 func (a *Uint32) setData(data *Data) {
 	a.array.setData(data)
 	vals := data.buffers[1]
@@ -155,6 +296,18 @@ func (a *Uint32) setData(data *Data) {
 		end := beg + a.array.data.length
 		a.values = a.values[beg:end]
 	}
+}
+
+func arrayEqualUint32(left, right *Uint32) bool {
+	for i := 0; i < left.Len(); i++ {
+		if left.IsNull(i) {
+			continue
+		}
+		if left.Value(i) != right.Value(i) {
+			return false
+		}
+	}
+	return true
 }
 
 // A type which represents an immutable sequence of float32 values.
@@ -173,6 +326,24 @@ func NewFloat32Data(data *Data) *Float32 {
 func (a *Float32) Value(i int) float32      { return a.values[i] }
 func (a *Float32) Float32Values() []float32 { return a.values }
 
+func (a *Float32) String() string {
+	o := new(strings.Builder)
+	o.WriteString("[")
+	for i, v := range a.values {
+		if i > 0 {
+			fmt.Fprintf(o, " ")
+		}
+		switch {
+		case a.IsNull(i):
+			o.WriteString("(null)")
+		default:
+			fmt.Fprintf(o, "%v", v)
+		}
+	}
+	o.WriteString("]")
+	return o.String()
+}
+
 func (a *Float32) setData(data *Data) {
 	a.array.setData(data)
 	vals := data.buffers[1]
@@ -182,6 +353,18 @@ func (a *Float32) setData(data *Data) {
 		end := beg + a.array.data.length
 		a.values = a.values[beg:end]
 	}
+}
+
+func arrayEqualFloat32(left, right *Float32) bool {
+	for i := 0; i < left.Len(); i++ {
+		if left.IsNull(i) {
+			continue
+		}
+		if left.Value(i) != right.Value(i) {
+			return false
+		}
+	}
+	return true
 }
 
 // A type which represents an immutable sequence of int16 values.
@@ -200,6 +383,24 @@ func NewInt16Data(data *Data) *Int16 {
 func (a *Int16) Value(i int) int16    { return a.values[i] }
 func (a *Int16) Int16Values() []int16 { return a.values }
 
+func (a *Int16) String() string {
+	o := new(strings.Builder)
+	o.WriteString("[")
+	for i, v := range a.values {
+		if i > 0 {
+			fmt.Fprintf(o, " ")
+		}
+		switch {
+		case a.IsNull(i):
+			o.WriteString("(null)")
+		default:
+			fmt.Fprintf(o, "%v", v)
+		}
+	}
+	o.WriteString("]")
+	return o.String()
+}
+
 func (a *Int16) setData(data *Data) {
 	a.array.setData(data)
 	vals := data.buffers[1]
@@ -209,6 +410,18 @@ func (a *Int16) setData(data *Data) {
 		end := beg + a.array.data.length
 		a.values = a.values[beg:end]
 	}
+}
+
+func arrayEqualInt16(left, right *Int16) bool {
+	for i := 0; i < left.Len(); i++ {
+		if left.IsNull(i) {
+			continue
+		}
+		if left.Value(i) != right.Value(i) {
+			return false
+		}
+	}
+	return true
 }
 
 // A type which represents an immutable sequence of uint16 values.
@@ -227,6 +440,24 @@ func NewUint16Data(data *Data) *Uint16 {
 func (a *Uint16) Value(i int) uint16     { return a.values[i] }
 func (a *Uint16) Uint16Values() []uint16 { return a.values }
 
+func (a *Uint16) String() string {
+	o := new(strings.Builder)
+	o.WriteString("[")
+	for i, v := range a.values {
+		if i > 0 {
+			fmt.Fprintf(o, " ")
+		}
+		switch {
+		case a.IsNull(i):
+			o.WriteString("(null)")
+		default:
+			fmt.Fprintf(o, "%v", v)
+		}
+	}
+	o.WriteString("]")
+	return o.String()
+}
+
 func (a *Uint16) setData(data *Data) {
 	a.array.setData(data)
 	vals := data.buffers[1]
@@ -236,6 +467,18 @@ func (a *Uint16) setData(data *Data) {
 		end := beg + a.array.data.length
 		a.values = a.values[beg:end]
 	}
+}
+
+func arrayEqualUint16(left, right *Uint16) bool {
+	for i := 0; i < left.Len(); i++ {
+		if left.IsNull(i) {
+			continue
+		}
+		if left.Value(i) != right.Value(i) {
+			return false
+		}
+	}
+	return true
 }
 
 // A type which represents an immutable sequence of int8 values.
@@ -254,6 +497,24 @@ func NewInt8Data(data *Data) *Int8 {
 func (a *Int8) Value(i int) int8   { return a.values[i] }
 func (a *Int8) Int8Values() []int8 { return a.values }
 
+func (a *Int8) String() string {
+	o := new(strings.Builder)
+	o.WriteString("[")
+	for i, v := range a.values {
+		if i > 0 {
+			fmt.Fprintf(o, " ")
+		}
+		switch {
+		case a.IsNull(i):
+			o.WriteString("(null)")
+		default:
+			fmt.Fprintf(o, "%v", v)
+		}
+	}
+	o.WriteString("]")
+	return o.String()
+}
+
 func (a *Int8) setData(data *Data) {
 	a.array.setData(data)
 	vals := data.buffers[1]
@@ -263,6 +524,18 @@ func (a *Int8) setData(data *Data) {
 		end := beg + a.array.data.length
 		a.values = a.values[beg:end]
 	}
+}
+
+func arrayEqualInt8(left, right *Int8) bool {
+	for i := 0; i < left.Len(); i++ {
+		if left.IsNull(i) {
+			continue
+		}
+		if left.Value(i) != right.Value(i) {
+			return false
+		}
+	}
+	return true
 }
 
 // A type which represents an immutable sequence of uint8 values.
@@ -281,6 +554,24 @@ func NewUint8Data(data *Data) *Uint8 {
 func (a *Uint8) Value(i int) uint8    { return a.values[i] }
 func (a *Uint8) Uint8Values() []uint8 { return a.values }
 
+func (a *Uint8) String() string {
+	o := new(strings.Builder)
+	o.WriteString("[")
+	for i, v := range a.values {
+		if i > 0 {
+			fmt.Fprintf(o, " ")
+		}
+		switch {
+		case a.IsNull(i):
+			o.WriteString("(null)")
+		default:
+			fmt.Fprintf(o, "%v", v)
+		}
+	}
+	o.WriteString("]")
+	return o.String()
+}
+
 func (a *Uint8) setData(data *Data) {
 	a.array.setData(data)
 	vals := data.buffers[1]
@@ -290,6 +581,18 @@ func (a *Uint8) setData(data *Data) {
 		end := beg + a.array.data.length
 		a.values = a.values[beg:end]
 	}
+}
+
+func arrayEqualUint8(left, right *Uint8) bool {
+	for i := 0; i < left.Len(); i++ {
+		if left.IsNull(i) {
+			continue
+		}
+		if left.Value(i) != right.Value(i) {
+			return false
+		}
+	}
+	return true
 }
 
 // A type which represents an immutable sequence of arrow.Timestamp values.
@@ -308,6 +611,24 @@ func NewTimestampData(data *Data) *Timestamp {
 func (a *Timestamp) Value(i int) arrow.Timestamp        { return a.values[i] }
 func (a *Timestamp) TimestampValues() []arrow.Timestamp { return a.values }
 
+func (a *Timestamp) String() string {
+	o := new(strings.Builder)
+	o.WriteString("[")
+	for i, v := range a.values {
+		if i > 0 {
+			fmt.Fprintf(o, " ")
+		}
+		switch {
+		case a.IsNull(i):
+			o.WriteString("(null)")
+		default:
+			fmt.Fprintf(o, "%v", v)
+		}
+	}
+	o.WriteString("]")
+	return o.String()
+}
+
 func (a *Timestamp) setData(data *Data) {
 	a.array.setData(data)
 	vals := data.buffers[1]
@@ -317,4 +638,301 @@ func (a *Timestamp) setData(data *Data) {
 		end := beg + a.array.data.length
 		a.values = a.values[beg:end]
 	}
+}
+
+func arrayEqualTimestamp(left, right *Timestamp) bool {
+	for i := 0; i < left.Len(); i++ {
+		if left.IsNull(i) {
+			continue
+		}
+		if left.Value(i) != right.Value(i) {
+			return false
+		}
+	}
+	return true
+}
+
+// A type which represents an immutable sequence of arrow.Time32 values.
+type Time32 struct {
+	array
+	values []arrow.Time32
+}
+
+func NewTime32Data(data *Data) *Time32 {
+	a := &Time32{}
+	a.refCount = 1
+	a.setData(data)
+	return a
+}
+
+func (a *Time32) Value(i int) arrow.Time32     { return a.values[i] }
+func (a *Time32) Time32Values() []arrow.Time32 { return a.values }
+
+func (a *Time32) String() string {
+	o := new(strings.Builder)
+	o.WriteString("[")
+	for i, v := range a.values {
+		if i > 0 {
+			fmt.Fprintf(o, " ")
+		}
+		switch {
+		case a.IsNull(i):
+			o.WriteString("(null)")
+		default:
+			fmt.Fprintf(o, "%v", v)
+		}
+	}
+	o.WriteString("]")
+	return o.String()
+}
+
+func (a *Time32) setData(data *Data) {
+	a.array.setData(data)
+	vals := data.buffers[1]
+	if vals != nil {
+		a.values = arrow.Time32Traits.CastFromBytes(vals.Bytes())
+		beg := a.array.data.offset
+		end := beg + a.array.data.length
+		a.values = a.values[beg:end]
+	}
+}
+
+func arrayEqualTime32(left, right *Time32) bool {
+	for i := 0; i < left.Len(); i++ {
+		if left.IsNull(i) {
+			continue
+		}
+		if left.Value(i) != right.Value(i) {
+			return false
+		}
+	}
+	return true
+}
+
+// A type which represents an immutable sequence of arrow.Time64 values.
+type Time64 struct {
+	array
+	values []arrow.Time64
+}
+
+func NewTime64Data(data *Data) *Time64 {
+	a := &Time64{}
+	a.refCount = 1
+	a.setData(data)
+	return a
+}
+
+func (a *Time64) Value(i int) arrow.Time64     { return a.values[i] }
+func (a *Time64) Time64Values() []arrow.Time64 { return a.values }
+
+func (a *Time64) String() string {
+	o := new(strings.Builder)
+	o.WriteString("[")
+	for i, v := range a.values {
+		if i > 0 {
+			fmt.Fprintf(o, " ")
+		}
+		switch {
+		case a.IsNull(i):
+			o.WriteString("(null)")
+		default:
+			fmt.Fprintf(o, "%v", v)
+		}
+	}
+	o.WriteString("]")
+	return o.String()
+}
+
+func (a *Time64) setData(data *Data) {
+	a.array.setData(data)
+	vals := data.buffers[1]
+	if vals != nil {
+		a.values = arrow.Time64Traits.CastFromBytes(vals.Bytes())
+		beg := a.array.data.offset
+		end := beg + a.array.data.length
+		a.values = a.values[beg:end]
+	}
+}
+
+func arrayEqualTime64(left, right *Time64) bool {
+	for i := 0; i < left.Len(); i++ {
+		if left.IsNull(i) {
+			continue
+		}
+		if left.Value(i) != right.Value(i) {
+			return false
+		}
+	}
+	return true
+}
+
+// A type which represents an immutable sequence of arrow.Date32 values.
+type Date32 struct {
+	array
+	values []arrow.Date32
+}
+
+func NewDate32Data(data *Data) *Date32 {
+	a := &Date32{}
+	a.refCount = 1
+	a.setData(data)
+	return a
+}
+
+func (a *Date32) Value(i int) arrow.Date32     { return a.values[i] }
+func (a *Date32) Date32Values() []arrow.Date32 { return a.values }
+
+func (a *Date32) String() string {
+	o := new(strings.Builder)
+	o.WriteString("[")
+	for i, v := range a.values {
+		if i > 0 {
+			fmt.Fprintf(o, " ")
+		}
+		switch {
+		case a.IsNull(i):
+			o.WriteString("(null)")
+		default:
+			fmt.Fprintf(o, "%v", v)
+		}
+	}
+	o.WriteString("]")
+	return o.String()
+}
+
+func (a *Date32) setData(data *Data) {
+	a.array.setData(data)
+	vals := data.buffers[1]
+	if vals != nil {
+		a.values = arrow.Date32Traits.CastFromBytes(vals.Bytes())
+		beg := a.array.data.offset
+		end := beg + a.array.data.length
+		a.values = a.values[beg:end]
+	}
+}
+
+func arrayEqualDate32(left, right *Date32) bool {
+	for i := 0; i < left.Len(); i++ {
+		if left.IsNull(i) {
+			continue
+		}
+		if left.Value(i) != right.Value(i) {
+			return false
+		}
+	}
+	return true
+}
+
+// A type which represents an immutable sequence of arrow.Date64 values.
+type Date64 struct {
+	array
+	values []arrow.Date64
+}
+
+func NewDate64Data(data *Data) *Date64 {
+	a := &Date64{}
+	a.refCount = 1
+	a.setData(data)
+	return a
+}
+
+func (a *Date64) Value(i int) arrow.Date64     { return a.values[i] }
+func (a *Date64) Date64Values() []arrow.Date64 { return a.values }
+
+func (a *Date64) String() string {
+	o := new(strings.Builder)
+	o.WriteString("[")
+	for i, v := range a.values {
+		if i > 0 {
+			fmt.Fprintf(o, " ")
+		}
+		switch {
+		case a.IsNull(i):
+			o.WriteString("(null)")
+		default:
+			fmt.Fprintf(o, "%v", v)
+		}
+	}
+	o.WriteString("]")
+	return o.String()
+}
+
+func (a *Date64) setData(data *Data) {
+	a.array.setData(data)
+	vals := data.buffers[1]
+	if vals != nil {
+		a.values = arrow.Date64Traits.CastFromBytes(vals.Bytes())
+		beg := a.array.data.offset
+		end := beg + a.array.data.length
+		a.values = a.values[beg:end]
+	}
+}
+
+func arrayEqualDate64(left, right *Date64) bool {
+	for i := 0; i < left.Len(); i++ {
+		if left.IsNull(i) {
+			continue
+		}
+		if left.Value(i) != right.Value(i) {
+			return false
+		}
+	}
+	return true
+}
+
+// A type which represents an immutable sequence of arrow.Duration values.
+type Duration struct {
+	array
+	values []arrow.Duration
+}
+
+func NewDurationData(data *Data) *Duration {
+	a := &Duration{}
+	a.refCount = 1
+	a.setData(data)
+	return a
+}
+
+func (a *Duration) Value(i int) arrow.Duration       { return a.values[i] }
+func (a *Duration) DurationValues() []arrow.Duration { return a.values }
+
+func (a *Duration) String() string {
+	o := new(strings.Builder)
+	o.WriteString("[")
+	for i, v := range a.values {
+		if i > 0 {
+			fmt.Fprintf(o, " ")
+		}
+		switch {
+		case a.IsNull(i):
+			o.WriteString("(null)")
+		default:
+			fmt.Fprintf(o, "%v", v)
+		}
+	}
+	o.WriteString("]")
+	return o.String()
+}
+
+func (a *Duration) setData(data *Data) {
+	a.array.setData(data)
+	vals := data.buffers[1]
+	if vals != nil {
+		a.values = arrow.DurationTraits.CastFromBytes(vals.Bytes())
+		beg := a.array.data.offset
+		end := beg + a.array.data.length
+		a.values = a.values[beg:end]
+	}
+}
+
+func arrayEqualDuration(left, right *Duration) bool {
+	for i := 0; i < left.Len(); i++ {
+		if left.IsNull(i) {
+			continue
+		}
+		if left.Value(i) != right.Value(i) {
+			return false
+		}
+	}
+	return true
 }

@@ -17,6 +17,7 @@
 package array
 
 import (
+	"strings"
 	"sync/atomic"
 
 	"github.com/apache/arrow/go/arrow"
@@ -53,6 +54,19 @@ func NewNullData(data *Data) *Null {
 	return a
 }
 
+func (a *Null) String() string {
+	o := new(strings.Builder)
+	o.WriteString("[")
+	for i := 0; i < a.Len(); i++ {
+		if i > 0 {
+			o.WriteString(" ")
+		}
+		o.WriteString("(null)")
+	}
+	o.WriteString("]")
+	return o.String()
+}
+
 func (a *Null) setData(data *Data) {
 	a.array.setData(data)
 	a.array.nullBitmapBytes = nil
@@ -86,10 +100,13 @@ func (b *NullBuilder) AppendNull() {
 	b.builder.nulls++
 }
 
+func (*NullBuilder) Reserve(size int) {}
+func (*NullBuilder) Resize(size int)  {}
+
 func (*NullBuilder) init(cap int)                       {}
 func (*NullBuilder) resize(newBits int, init func(int)) {}
 
-// NewArray creates a List array from the memory buffers used by the builder and resets the NullBuilder
+// NewArray creates a Null array from the memory buffers used by the builder and resets the NullBuilder
 // so it can be used to build a new array.
 func (b *NullBuilder) NewArray() Interface {
 	return b.NewNullArray()

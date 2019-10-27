@@ -17,11 +17,17 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
+#include <memory>
 #include <sstream>
+#include <string>
+#include <unordered_map>
 #include <utility>
+#include <vector>
 
 #include "arrow/util/key_value_metadata.h"
 #include "arrow/util/logging.h"
+#include "arrow/util/stl.h"
 
 using std::size_t;
 
@@ -52,13 +58,13 @@ KeyValueMetadata::KeyValueMetadata() : keys_(), values_() {}
 KeyValueMetadata::KeyValueMetadata(
     const std::unordered_map<std::string, std::string>& map)
     : keys_(UnorderedMapKeys(map)), values_(UnorderedMapValues(map)) {
-  DCHECK_EQ(keys_.size(), values_.size());
+  ARROW_CHECK_EQ(keys_.size(), values_.size());
 }
 
 KeyValueMetadata::KeyValueMetadata(const std::vector<std::string>& keys,
                                    const std::vector<std::string>& values)
     : keys_(keys), values_(values) {
-  DCHECK_EQ(keys.size(), values.size());
+  ARROW_CHECK_EQ(keys.size(), values.size());
 }
 
 void KeyValueMetadata::ToUnorderedMap(
@@ -88,16 +94,36 @@ int64_t KeyValueMetadata::size() const {
   return static_cast<int64_t>(keys_.size());
 }
 
-std::string KeyValueMetadata::key(int64_t i) const {
+const std::string& KeyValueMetadata::key(int64_t i) const {
   DCHECK_GE(i, 0);
   DCHECK_LT(static_cast<size_t>(i), keys_.size());
   return keys_[i];
 }
 
-std::string KeyValueMetadata::value(int64_t i) const {
+const std::string& KeyValueMetadata::value(int64_t i) const {
   DCHECK_GE(i, 0);
   DCHECK_LT(static_cast<size_t>(i), values_.size());
   return values_[i];
+}
+
+std::vector<std::pair<std::string, std::string>> KeyValueMetadata::sorted_pairs() const {
+  std::vector<std::pair<std::string, std::string>> pairs;
+  pairs.reserve(size());
+
+  auto indices = internal::ArgSort(keys_);
+  for (const auto i : indices) {
+    pairs.emplace_back(keys_[i], values_[i]);
+  }
+  return pairs;
+}
+
+int KeyValueMetadata::FindKey(const std::string& key) const {
+  for (size_t i = 0; i < keys_.size(); ++i) {
+    if (keys_[i] == key) {
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
 }
 
 std::shared_ptr<KeyValueMetadata> KeyValueMetadata::Copy() const {
@@ -105,9 +131,21 @@ std::shared_ptr<KeyValueMetadata> KeyValueMetadata::Copy() const {
 }
 
 bool KeyValueMetadata::Equals(const KeyValueMetadata& other) const {
-  return size() == other.size() &&
-         std::equal(keys_.cbegin(), keys_.cend(), other.keys_.cbegin()) &&
-         std::equal(values_.cbegin(), values_.cend(), other.values_.cbegin());
+  if (size() != other.size()) {
+    return false;
+  }
+
+  auto indices = internal::ArgSort(keys_);
+  auto other_indices = internal::ArgSort(other.keys_);
+
+  for (int64_t i = 0; i < size(); ++i) {
+    auto j = indices[i];
+    auto k = other_indices[i];
+    if (keys_[j] != other.keys_[k] || values_[j] != other.values_[k]) {
+      return false;
+    }
+  }
+  return true;
 }
 
 std::string KeyValueMetadata::ToString() const {
@@ -124,6 +162,11 @@ std::string KeyValueMetadata::ToString() const {
 std::shared_ptr<KeyValueMetadata> key_value_metadata(
     const std::unordered_map<std::string, std::string>& pairs) {
   return std::make_shared<KeyValueMetadata>(pairs);
+}
+
+std::shared_ptr<KeyValueMetadata> key_value_metadata(
+    const std::vector<std::string>& keys, const std::vector<std::string>& values) {
+  return std::make_shared<KeyValueMetadata>(keys, values);
 }
 
 }  // namespace arrow

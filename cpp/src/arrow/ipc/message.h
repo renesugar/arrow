@@ -17,13 +17,13 @@
 
 // C++ object model and user API for interprocess schema messaging
 
-#ifndef ARROW_IPC_MESSAGE_H
-#define ARROW_IPC_MESSAGE_H
+#pragma once
 
 #include <cstdint>
 #include <memory>
 #include <string>
 
+#include "arrow/ipc/options.h"
 #include "arrow/status.h"
 #include "arrow/util/macros.h"
 #include "arrow/util/visibility.h"
@@ -31,9 +31,11 @@
 namespace arrow {
 
 class Buffer;
+class MemoryPool;
 
 namespace io {
 
+class FileInterface;
 class InputStream;
 class OutputStream;
 class RandomAccessFile;
@@ -56,11 +58,6 @@ enum class MetadataVersion : char {
   V4
 };
 
-// ARROW-109: We set this number arbitrarily to help catch user mistakes. For
-// deeply nested schemas, it is expected the user will indicate explicitly the
-// maximum allowed recursion depth
-constexpr int kMaxNestingDepth = 64;
-
 // Read interface classes. We do not fully deserialize the flatbuffers so that
 // individual fields metadata can be retrieved from very large schema without
 //
@@ -69,7 +66,7 @@ constexpr int kMaxNestingDepth = 64;
 /// \brief An IPC message including metadata and body
 class ARROW_EXPORT Message {
  public:
-  enum Type { NONE, SCHEMA, DICTIONARY_BATCH, RECORD_BATCH, TENSOR };
+  enum Type { NONE, SCHEMA, DICTIONARY_BATCH, RECORD_BATCH, TENSOR, SPARSE_TENSOR };
 
   /// \brief Construct message, but do not validate
   ///
@@ -94,7 +91,7 @@ class ARROW_EXPORT Message {
   /// \return Status
   ///
   /// \note If stream supports zero-copy, this is zero-copy
-  static Status ReadFrom(const std::shared_ptr<Buffer>& metadata, io::InputStream* stream,
+  static Status ReadFrom(std::shared_ptr<Buffer> metadata, io::InputStream* stream,
                          std::unique_ptr<Message>* out);
 
   /// \brief Read message body from position in file, and create Message given
@@ -106,7 +103,7 @@ class ARROW_EXPORT Message {
   /// \return Status
   ///
   /// \note If file supports zero-copy, this is zero-copy
-  static Status ReadFrom(const int64_t offset, const std::shared_ptr<Buffer>& metadata,
+  static Status ReadFrom(const int64_t offset, std::shared_ptr<Buffer> metadata,
                          io::RandomAccessFile* file, std::unique_ptr<Message>* out);
 
   /// \brief Return true if message type and contents are equal
@@ -125,6 +122,10 @@ class ARROW_EXPORT Message {
   /// \return buffer is null if no body
   std::shared_ptr<Buffer> body() const;
 
+  /// \brief The expected body length according to the metadata, for
+  /// verification purposes
+  int64_t body_length() const;
+
   /// \brief The Message type
   Type type() const;
 
@@ -136,9 +137,17 @@ class ARROW_EXPORT Message {
   /// \brief Write length-prefixed metadata and body to output stream
   ///
   /// \param[in] file output stream to write to
+  /// \param[in] options IPC writing options including alignment
   /// \param[out] output_length the number of bytes written
   /// \return Status
-  Status SerializeTo(io::OutputStream* file, int64_t* output_length) const;
+  Status SerializeTo(io::OutputStream* file, const IpcOptions& options,
+                     int64_t* output_length) const;
+
+  /// \brief Return true if the Message metadata passes Flatbuffer validation
+  bool Verify() const;
+
+  /// \brief Whether a given message type needs a body.
+  static bool HasBody(Type type) { return type != NONE && type != SCHEMA; }
 
  private:
   // Hide serialization details from user API
@@ -188,23 +197,62 @@ ARROW_EXPORT
 Status ReadMessage(const int64_t offset, const int32_t metadata_length,
                    io::RandomAccessFile* file, std::unique_ptr<Message>* message);
 
-/// \brief Read encapsulated RPC message (metadata and body) from InputStream
-///
-/// Read length-prefixed message with as-yet unknown length. Returns null if
-/// there are not enough bytes available or the message length is 0 (e.g. EOS
-/// in a stream)
+/// \brief Advance stream to an 8-byte offset if its position is not a multiple
+/// of 8 already
+/// \param[in] stream an input stream
+/// \param[in] alignment the byte multiple for the metadata prefix, usually 8
+/// or 64, to ensure the body starts on a multiple of that alignment
+/// \return Status
 ARROW_EXPORT
-Status ReadMessage(io::InputStream* stream, bool aligned,
-                   std::unique_ptr<Message>* message);
+Status AlignStream(io::InputStream* stream, int32_t alignment = 8);
 
-/// \brief Read encapsulated RPC message (metadata and body) from InputStream.
+/// \brief Advance stream to an 8-byte offset if its position is not a multiple
+/// of 8 already
+/// \param[in] stream an output stream
+/// \param[in] alignment the byte multiple for the metadata prefix, usually 8
+/// or 64, to ensure the body starts on a multiple of that alignment
+/// \return Status
+ARROW_EXPORT
+Status AlignStream(io::OutputStream* stream, int32_t alignment = 8);
+
+/// \brief Return error Status if file position is not a multiple of the
+/// indicated alignment
+ARROW_EXPORT
+Status CheckAligned(io::FileInterface* stream, int32_t alignment = 8);
+
+/// \brief Read encapsulated IPC message (metadata and body) from InputStream
 ///
-/// This is a version of ReadMessage that does not have the aligned argument
-/// for backwards compatibility.
+/// Returns null if there are not enough bytes available or the
+/// message length is 0 (e.g. EOS in a stream)
 ARROW_EXPORT
 Status ReadMessage(io::InputStream* stream, std::unique_ptr<Message>* message);
 
+/// \brief Read encapsulated IPC message (metadata and body) from InputStream
+///
+/// Like ReadMessage, except that the metadata is copied in a new buffer.
+/// This is necessary if the stream returns non-CPU buffers.
+ARROW_EXPORT
+Status ReadMessageCopy(io::InputStream* stream, MemoryPool* pool,
+                       std::unique_ptr<Message>* message);
+
+/// Write encapsulated IPC message Does not make assumptions about
+/// whether the stream is aligned already. Can write legacy (pre
+/// version 0.15.0) IPC message if option set
+///
+/// continuation: 0xFFFFFFFF
+/// message_size: int32
+/// message: const void*
+/// padding
+///
+/// \param[in] message a buffer containing the metadata to write
+/// \param[in] options IPC writing options, including alignment and
+/// legacy message support
+/// \param[in,out] file the OutputStream to write to
+/// \param[out] message_length the total size of the payload written including
+/// padding
+/// \return Status
+Status WriteMessage(const Buffer& message, const IpcOptions& options,
+                    io::OutputStream* file, int32_t* message_length);
+
 }  // namespace ipc
 }  // namespace arrow
-
-#endif  // ARROW_IPC_MESSAGE_H

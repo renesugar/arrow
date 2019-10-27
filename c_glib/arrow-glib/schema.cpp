@@ -21,6 +21,7 @@
 #  include <config.h>
 #endif
 
+#include <arrow-glib/basic-data-type.hpp>
 #include <arrow-glib/error.hpp>
 #include <arrow-glib/field.hpp>
 #include <arrow-glib/schema.hpp>
@@ -48,10 +49,10 @@ G_DEFINE_TYPE_WITH_PRIVATE(GArrowSchema,
                            garrow_schema,
                            G_TYPE_OBJECT)
 
-#define GARROW_SCHEMA_GET_PRIVATE(obj)                  \
-  (G_TYPE_INSTANCE_GET_PRIVATE((obj),                   \
-                               GARROW_TYPE_SCHEMA,      \
-                               GArrowSchemaPrivate))
+#define GARROW_SCHEMA_GET_PRIVATE(obj)         \
+  static_cast<GArrowSchemaPrivate *>(          \
+     garrow_schema_get_instance_private(       \
+       GARROW_SCHEMA(obj)))
 
 static void
 garrow_schema_finalize(GObject *object)
@@ -173,7 +174,7 @@ garrow_schema_get_field(GArrowSchema *schema, guint i)
 {
   const auto arrow_schema = garrow_schema_get_raw(schema);
   auto arrow_field = arrow_schema->field(i);
-  return garrow_field_new_raw(&arrow_field);
+  return garrow_field_new_raw(&arrow_field, nullptr);
 }
 
 /**
@@ -192,8 +193,26 @@ garrow_schema_get_field_by_name(GArrowSchema *schema,
   if (arrow_field == nullptr) {
     return NULL;
   } else {
-    return garrow_field_new_raw(&arrow_field);
+    auto arrow_data_type = arrow_field->type();
+    return garrow_field_new_raw(&arrow_field, nullptr);
   }
+}
+
+/**
+ * garrow_schema_get_field_index:
+ * @schema: A #GArrowSchema.
+ * @name: The name of the field to be found.
+ *
+ * Returns: The index of the found field, -1 on not found.
+ *
+ * Since: 1.0.0
+ */
+gint
+garrow_schema_get_field_index(GArrowSchema *schema,
+                              const gchar *name)
+{
+  const auto &arrow_schema = garrow_schema_get_raw(schema);
+  return arrow_schema->GetFieldIndex(std::string(name));
 }
 
 /**
@@ -223,7 +242,7 @@ garrow_schema_get_fields(GArrowSchema *schema)
 
   GList *fields = NULL;
   for (auto arrow_field : arrow_schema->fields()) {
-    GArrowField *field = garrow_field_new_raw(&arrow_field);
+    auto field = garrow_field_new_raw(&arrow_field, nullptr);
     fields = g_list_prepend(fields, field);
   }
 

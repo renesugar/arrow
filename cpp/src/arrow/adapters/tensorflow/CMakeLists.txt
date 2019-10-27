@@ -15,7 +15,4 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# Headers: top level
-install(FILES
-        convert.h
-        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/arrow/adapters/tensorflow")
+arrow_install_all_headers("arrow/adapters/tensorflow")

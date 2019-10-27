@@ -18,8 +18,9 @@
 #include "plasma/common.h"
 
 #include <limits>
-#include <mutex>
-#include <random>
+#include <utility>
+
+#include "arrow/util/ubsan.h"
 
 #include "plasma/plasma_generated.h"
 
@@ -27,22 +28,86 @@ namespace fb = plasma::flatbuf;
 
 namespace plasma {
 
+namespace {
+
+const char kErrorDetailTypeId[] = "plasma::PlasmaStatusDetail";
+
+class PlasmaStatusDetail : public arrow::StatusDetail {
+ public:
+  explicit PlasmaStatusDetail(PlasmaErrorCode code) : code_(code) {}
+  const char* type_id() const override { return kErrorDetailTypeId; }
+  std::string ToString() const override {
+    const char* type;
+    switch (code()) {
+      case PlasmaErrorCode::PlasmaObjectExists:
+        type = "Plasma object exists";
+        break;
+      case PlasmaErrorCode::PlasmaObjectNonexistent:
+        type = "Plasma object is nonexistent";
+        break;
+      case PlasmaErrorCode::PlasmaStoreFull:
+        type = "Plasma store is full";
+        break;
+      case PlasmaErrorCode::PlasmaObjectAlreadySealed:
+        type = "Plasma object is already sealed";
+        break;
+      default:
+        type = "Unknown plasma error";
+        break;
+    }
+    return std::string(type);
+  }
+  PlasmaErrorCode code() const { return code_; }
+
+ private:
+  PlasmaErrorCode code_;
+};
+
+bool IsPlasmaStatus(const arrow::Status& status, PlasmaErrorCode code) {
+  if (status.ok()) {
+    return false;
+  }
+  auto* detail = status.detail().get();
+  return detail != nullptr && detail->type_id() == kErrorDetailTypeId &&
+         static_cast<PlasmaStatusDetail*>(detail)->code() == code;
+}
+
+}  // namespace
+
 using arrow::Status;
 
-UniqueID UniqueID::from_random() {
-  UniqueID id;
-  uint8_t* data = id.mutable_data();
-  // NOTE(pcm): The right way to do this is to have one std::mt19937 per
-  // thread (using the thread_local keyword), but that's not supported on
-  // older versions of macOS (see https://stackoverflow.com/a/29929949)
-  static std::mutex mutex;
-  std::lock_guard<std::mutex> lock(mutex);
-  static std::mt19937 generator;
-  std::uniform_int_distribution<uint32_t> dist(0, std::numeric_limits<uint8_t>::max());
-  for (int i = 0; i < kUniqueIDSize; i++) {
-    data[i] = static_cast<uint8_t>(dist(generator));
+arrow::Status MakePlasmaError(PlasmaErrorCode code, std::string message) {
+  arrow::StatusCode arrow_code = arrow::StatusCode::UnknownError;
+  switch (code) {
+    case PlasmaErrorCode::PlasmaObjectExists:
+      arrow_code = arrow::StatusCode::AlreadyExists;
+      break;
+    case PlasmaErrorCode::PlasmaObjectNonexistent:
+      arrow_code = arrow::StatusCode::KeyError;
+      break;
+    case PlasmaErrorCode::PlasmaStoreFull:
+      arrow_code = arrow::StatusCode::CapacityError;
+      break;
+    case PlasmaErrorCode::PlasmaObjectAlreadySealed:
+      // Maybe a stretch?
+      arrow_code = arrow::StatusCode::TypeError;
+      break;
   }
-  return id;
+  return arrow::Status(arrow_code, std::move(message),
+                       std::make_shared<PlasmaStatusDetail>(code));
+}
+
+bool IsPlasmaObjectExists(const arrow::Status& status) {
+  return IsPlasmaStatus(status, PlasmaErrorCode::PlasmaObjectExists);
+}
+bool IsPlasmaObjectNonexistent(const arrow::Status& status) {
+  return IsPlasmaStatus(status, PlasmaErrorCode::PlasmaObjectNonexistent);
+}
+bool IsPlasmaObjectAlreadySealed(const arrow::Status& status) {
+  return IsPlasmaStatus(status, PlasmaErrorCode::PlasmaObjectAlreadySealed);
+}
+bool IsPlasmaStoreFull(const arrow::Status& status) {
+  return IsPlasmaStatus(status, PlasmaErrorCode::PlasmaStoreFull);
 }
 
 UniqueID UniqueID::from_binary(const std::string& binary) {
@@ -82,7 +147,7 @@ uint64_t MurmurHash64A(const void* key, int len, unsigned int seed) {
   const uint64_t* end = data + (len / 8);
 
   while (data != end) {
-    uint64_t k = *data++;
+    uint64_t k = arrow::util::SafeLoad(data++);
 
     k *= m;
     k ^= k >> r;
@@ -96,17 +161,17 @@ uint64_t MurmurHash64A(const void* key, int len, unsigned int seed) {
 
   switch (len & 7) {
     case 7:
-      h ^= uint64_t(data2[6]) << 48;
+      h ^= uint64_t(data2[6]) << 48;  // fall through
     case 6:
-      h ^= uint64_t(data2[5]) << 40;
+      h ^= uint64_t(data2[5]) << 40;  // fall through
     case 5:
-      h ^= uint64_t(data2[4]) << 32;
+      h ^= uint64_t(data2[4]) << 32;  // fall through
     case 4:
-      h ^= uint64_t(data2[3]) << 24;
+      h ^= uint64_t(data2[3]) << 24;  // fall through
     case 3:
-      h ^= uint64_t(data2[2]) << 16;
+      h ^= uint64_t(data2[2]) << 16;  // fall through
     case 2:
-      h ^= uint64_t(data2[1]) << 8;
+      h ^= uint64_t(data2[1]) << 8;  // fall through
     case 1:
       h ^= uint64_t(data2[0]);
       h *= m;
@@ -124,9 +189,6 @@ size_t UniqueID::hash() const { return MurmurHash64A(&id_[0], kUniqueIDSize, 0);
 bool UniqueID::operator==(const UniqueID& rhs) const {
   return std::memcmp(data(), rhs.data(), kUniqueIDSize) == 0;
 }
-
-ARROW_EXPORT fb::ObjectStatus ObjectStatusLocal = fb::ObjectStatus::Local;
-ARROW_EXPORT fb::ObjectStatus ObjectStatusRemote = fb::ObjectStatus::Remote;
 
 const PlasmaStoreInfo* plasma_config;
 

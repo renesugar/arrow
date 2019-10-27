@@ -1,14 +1,13 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
- * <p>
- * http://www.apache.org/licenses/LICENSE-2.0
- * <p>
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -21,9 +20,10 @@ package org.apache.arrow.vector;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.vector.complex.impl.VarBinaryReaderImpl;
 import org.apache.arrow.vector.complex.reader.FieldReader;
-import org.apache.arrow.vector.holders.VarBinaryHolder;
 import org.apache.arrow.vector.holders.NullableVarBinaryHolder;
+import org.apache.arrow.vector.holders.VarBinaryHolder;
 import org.apache.arrow.vector.types.Types.MinorType;
+import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.util.TransferPair;
 
@@ -32,12 +32,13 @@ import org.apache.arrow.vector.util.TransferPair;
  * values which could be NULL. A validity buffer (bit vector) is maintained
  * to track which elements in the vector are null.
  */
-public class VarBinaryVector extends BaseVariableWidthVector {
+public final class VarBinaryVector extends BaseVariableWidthVector {
   private final FieldReader reader;
 
   /**
    * Instantiate a VarBinaryVector. This doesn't allocate any memory for
    * the data in vector.
+   *
    * @param name name of the vector
    * @param allocator allocator for memory management.
    */
@@ -48,17 +49,30 @@ public class VarBinaryVector extends BaseVariableWidthVector {
   /**
    * Instantiate a VarBinaryVector. This doesn't allocate any memory for
    * the data in vector.
+   *
    * @param name name of the vector
    * @param fieldType type of Field materialized by this vector
    * @param allocator allocator for memory management.
    */
   public VarBinaryVector(String name, FieldType fieldType, BufferAllocator allocator) {
-    super(name, allocator, fieldType);
+    this(new Field(name, fieldType, null), allocator);
+  }
+
+  /**
+   * Instantiate a VarBinaryVector. This doesn't allocate any memory for
+   * the data in vector.
+   *
+   * @param field field materialized by this vector
+   * @param allocator allocator for memory management.
+   */
+  public VarBinaryVector(Field field, BufferAllocator allocator) {
+    super(field, allocator);
     reader = new VarBinaryReaderImpl(VarBinaryVector.this);
   }
 
   /**
-   * Get a reader that supports reading values from this vector
+   * Get a reader that supports reading values from this vector.
+   *
    * @return Field Reader for this vector
    */
   @Override
@@ -69,6 +83,7 @@ public class VarBinaryVector extends BaseVariableWidthVector {
   /**
    * Get minor type for this vector. The vector holds values belonging
    * to a particular type.
+   *
    * @return {@link org.apache.arrow.vector.types.Types.MinorType}
    */
   @Override
@@ -77,11 +92,11 @@ public class VarBinaryVector extends BaseVariableWidthVector {
   }
 
 
-  /******************************************************************
-   *                                                                *
-   *          vector value getter methods                           *
-   *                                                                *
-   ******************************************************************/
+  /*----------------------------------------------------------------*
+   |                                                                |
+   |          vector value retrieval methods                        |
+   |                                                                |
+   *----------------------------------------------------------------*/
 
 
   /**
@@ -93,9 +108,9 @@ public class VarBinaryVector extends BaseVariableWidthVector {
   public byte[] get(int index) {
     assert index >= 0;
     if (isSet(index) == 0) {
-      throw new IllegalStateException("Value at index is null");
+      return null;
     }
-    final int startOffset = getstartOffset(index);
+    final int startOffset = getStartOffset(index);
     final int dataLength =
             offsetBuffer.getInt((index + 1) * OFFSET_WIDTH) - startOffset;
     final byte[] result = new byte[dataLength];
@@ -110,13 +125,7 @@ public class VarBinaryVector extends BaseVariableWidthVector {
    * @return byte array for non-null element, null otherwise
    */
   public byte[] getObject(int index) {
-    byte[] b;
-    try {
-      b = get(index);
-    } catch (IllegalStateException e) {
-      return null;
-    }
-    return b;
+    return get(index);
   }
 
   /**
@@ -133,62 +142,22 @@ public class VarBinaryVector extends BaseVariableWidthVector {
       return;
     }
     holder.isSet = 1;
-    holder.start = getstartOffset(index);
+    holder.start = getStartOffset(index);
     holder.end = offsetBuffer.getInt((index + 1) * OFFSET_WIDTH);
     holder.buffer = valueBuffer;
   }
 
 
-  /******************************************************************
-   *                                                                *
-   *          vector value setter methods                           *
-   *                                                                *
-   ******************************************************************/
+  /*----------------------------------------------------------------*
+   |                                                                |
+   |          vector value setter methods                           |
+   |                                                                |
+   *----------------------------------------------------------------*/
 
-
-  /**
-   * Copy a cell value from a particular index in source vector to a particular
-   * position in this vector
-   * @param fromIndex position to copy from in source vector
-   * @param thisIndex position to copy to in this vector
-   * @param from source vector
-   */
-  public void copyFrom(int fromIndex, int thisIndex, VarBinaryVector from) {
-    final int start = from.offsetBuffer.getInt(fromIndex * OFFSET_WIDTH);
-    final int end = from.offsetBuffer.getInt((fromIndex + 1) * OFFSET_WIDTH);
-    final int length = end - start;
-    fillHoles(thisIndex);
-    BitVectorHelper.setValidityBit(this.validityBuffer, thisIndex, from.isSet(fromIndex));
-    final int copyStart = offsetBuffer.getInt(thisIndex * OFFSET_WIDTH);
-    from.valueBuffer.getBytes(start, this.valueBuffer, copyStart, length);
-    offsetBuffer.setInt((thisIndex + 1) * OFFSET_WIDTH, copyStart + length);
-    lastSet = thisIndex;
-  }
-
-  /**
-   * Same as {@link #copyFrom(int, int, VarBinaryVector)} except that
-   * it handles the case when the capacity of the vector needs to be expanded
-   * before copy.
-   * @param fromIndex position to copy from in source vector
-   * @param thisIndex position to copy to in this vector
-   * @param from source vector
-   */
-  public void copyFromSafe(int fromIndex, int thisIndex, VarBinaryVector from) {
-    final int start = from.offsetBuffer.getInt(fromIndex * OFFSET_WIDTH);
-    final int end = from.offsetBuffer.getInt((fromIndex + 1) * OFFSET_WIDTH);
-    final int length = end - start;
-    handleSafe(thisIndex, length);
-    fillHoles(thisIndex);
-    BitVectorHelper.setValidityBit(this.validityBuffer, thisIndex, from.isSet(fromIndex));
-    final int copyStart = offsetBuffer.getInt(thisIndex * OFFSET_WIDTH);
-    from.valueBuffer.getBytes(start, this.valueBuffer, copyStart, length);
-    offsetBuffer.setInt((thisIndex + 1) * OFFSET_WIDTH, copyStart + length);
-    lastSet = thisIndex;
-  }
 
   /**
    * Set the variable length element at the specified index to the data
-   * buffer supplied in the holder
+   * buffer supplied in the holder.
    *
    * @param index   position of the element to set
    * @param holder  holder that carries data buffer.
@@ -198,7 +167,7 @@ public class VarBinaryVector extends BaseVariableWidthVector {
     fillHoles(index);
     BitVectorHelper.setValidityBitToOne(validityBuffer, index);
     final int dataLength = holder.end - holder.start;
-    final int startOffset = getstartOffset(index);
+    final int startOffset = getStartOffset(index);
     offsetBuffer.setInt((index + 1) * OFFSET_WIDTH, startOffset + dataLength);
     valueBuffer.setBytes(startOffset, holder.buffer, holder.start, dataLength);
     lastSet = index;
@@ -218,7 +187,7 @@ public class VarBinaryVector extends BaseVariableWidthVector {
     fillEmpties(index);
     handleSafe(index, dataLength);
     BitVectorHelper.setValidityBitToOne(validityBuffer, index);
-    final int startOffset = getstartOffset(index);
+    final int startOffset = getStartOffset(index);
     offsetBuffer.setInt((index + 1) * OFFSET_WIDTH, startOffset + dataLength);
     valueBuffer.setBytes(startOffset, holder.buffer, holder.start, dataLength);
     lastSet = index;
@@ -226,7 +195,7 @@ public class VarBinaryVector extends BaseVariableWidthVector {
 
   /**
    * Set the variable length element at the specified index to the data
-   * buffer supplied in the holder
+   * buffer supplied in the holder.
    *
    * @param index   position of the element to set
    * @param holder  holder that carries data buffer.
@@ -235,10 +204,14 @@ public class VarBinaryVector extends BaseVariableWidthVector {
     assert index >= 0;
     fillHoles(index);
     BitVectorHelper.setValidityBit(validityBuffer, index, holder.isSet);
-    final int dataLength = holder.end - holder.start;
-    final int startOffset = getstartOffset(index);
-    offsetBuffer.setInt((index + 1) * OFFSET_WIDTH, startOffset + dataLength);
-    valueBuffer.setBytes(startOffset, holder.buffer, holder.start, dataLength);
+    final int startOffset = getStartOffset(index);
+    if (holder.isSet != 0) {
+      final int dataLength = holder.end - holder.start;
+      offsetBuffer.setInt((index + 1) * OFFSET_WIDTH, startOffset + dataLength);
+      valueBuffer.setBytes(startOffset, holder.buffer, holder.start, dataLength);
+    } else {
+      offsetBuffer.setInt((index + 1) * OFFSET_WIDTH, startOffset);
+    }
     lastSet = index;
   }
 
@@ -252,26 +225,32 @@ public class VarBinaryVector extends BaseVariableWidthVector {
    */
   public void setSafe(int index, NullableVarBinaryHolder holder) {
     assert index >= 0;
-    final int dataLength = holder.end - holder.start;
     fillEmpties(index);
-    handleSafe(index, dataLength);
     BitVectorHelper.setValidityBit(validityBuffer, index, holder.isSet);
-    final int startOffset = getstartOffset(index);
-    offsetBuffer.setInt((index + 1) * OFFSET_WIDTH, startOffset + dataLength);
-    valueBuffer.setBytes(startOffset, holder.buffer, holder.start, dataLength);
+    final int startOffset = getStartOffset(index);
+    if (holder.isSet != 0) {
+      final int dataLength = holder.end - holder.start;
+      handleSafe(index, dataLength);
+      offsetBuffer.setInt((index + 1) * OFFSET_WIDTH, startOffset + dataLength);
+      valueBuffer.setBytes(startOffset, holder.buffer, holder.start, dataLength);
+    } else {
+      handleSafe(index, 0);
+      offsetBuffer.setInt((index + 1) * OFFSET_WIDTH, startOffset);
+    }
     lastSet = index;
   }
 
 
-  /******************************************************************
-   *                                                                *
-   *                      vector transfer                           *
-   *                                                                *
-   ******************************************************************/
+  /*----------------------------------------------------------------*
+   |                                                                |
+   |                      vector transfer                           |
+   |                                                                |
+   *----------------------------------------------------------------*/
 
   /**
    * Construct a TransferPair comprising of this and and a target vector of
    * the same type.
+   *
    * @param ref name of the target vector
    * @param allocator allocator for the target vector
    * @return {@link TransferPair}
@@ -283,6 +262,7 @@ public class VarBinaryVector extends BaseVariableWidthVector {
 
   /**
    * Construct a TransferPair with a desired target vector of the same type.
+   *
    * @param to target vector
    * @return {@link TransferPair}
    */

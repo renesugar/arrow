@@ -23,7 +23,7 @@
 #include <sstream>
 
 #include "arrow/dbi/hiveserver2/session.h"
-#include "arrow/dbi/hiveserver2/thrift-internal.h"
+#include "arrow/dbi/hiveserver2/thrift_internal.h"
 
 #include "arrow/dbi/hiveserver2/ImpalaHiveServer2Service.h"
 #include "arrow/dbi/hiveserver2/TCLIService.h"
@@ -39,8 +39,6 @@ using apache::thrift::protocol::TProtocol;
 using apache::thrift::transport::TBufferedTransport;
 using apache::thrift::transport::TSocket;
 using apache::thrift::transport::TTransport;
-using std::string;
-using std::unique_ptr;
 
 namespace arrow {
 namespace hiveserver2 {
@@ -52,8 +50,9 @@ struct Service::ServiceImpl {
   std::shared_ptr<TProtocol> protocol;
 };
 
-Status Service::Connect(const string& host, int port, int conn_timeout,
-                        ProtocolVersion protocol_version, unique_ptr<Service>* service) {
+Status Service::Connect(const std::string& host, int port, int conn_timeout,
+                        ProtocolVersion protocol_version,
+                        std::unique_ptr<Service>* service) {
   service->reset(new Service(host, port, conn_timeout, protocol_version));
   return (*service)->Open();
 }
@@ -74,13 +73,13 @@ void Service::SetRecvTimeout(int timeout) { impl_->socket->setRecvTimeout(timeou
 
 void Service::SetSendTimeout(int timeout) { impl_->socket->setSendTimeout(timeout); }
 
-Status Service::OpenSession(const string& user, const HS2ClientConfig& config,
-                            unique_ptr<Session>* session) const {
+Status Service::OpenSession(const std::string& user, const HS2ClientConfig& config,
+                            std::unique_ptr<Session>* session) const {
   session->reset(new Session(rpc_));
   return (*session)->Open(config, user);
 }
 
-Service::Service(const string& host, int port, int conn_timeout,
+Service::Service(const std::string& host, int port, int conn_timeout,
                  ProtocolVersion protocol_version)
     : host_(host),
       port_(port),
@@ -92,9 +91,7 @@ Service::Service(const string& host, int port, int conn_timeout,
 
 Status Service::Open() {
   if (impl_->protocol_version < hs2::TProtocolVersion::HIVE_CLI_SERVICE_PROTOCOL_V6) {
-    std::stringstream ss;
-    ss << "Unsupported protocol: " << impl_->protocol_version;
-    return Status::NotImplemented(ss.str());
+    return Status::NotImplemented("Unsupported protocol: ", impl_->protocol_version);
   }
 
   impl_->socket.reset(new TSocket(host_, port_));

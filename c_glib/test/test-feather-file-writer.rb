@@ -40,29 +40,55 @@ class TestFeatherFileWriter < Test::Unit::TestCase
     input = Arrow::MemoryMappedInputStream.new(tempfile.path)
     begin
       reader = Arrow::FeatherFileReader.new(input)
-      assert_equal([true, "Log"],
-                   [reader.has_description?, reader.description])
-      column_values = {}
-      reader.columns.each do |column|
-        values = []
-        column.data.chunks.each do |array|
-          array.length.times do |j|
-            if array.respond_to?(:get_string)
-              values << array.get_string(j)
-            else
-              values << array.get_value(j)
-            end
-          end
-        end
-        column_values[column.name] = values
+      columns = reader.n_columns.times.collect do |i|
+        [
+          reader.get_column_name(i),
+          reader.get_column_data(i).get_chunk(0),
+        ]
       end
-      assert_equal({
-                     "message" => ["Crash", "Error", "Shutdown"],
-                     "is_critical" => [true, true, false],
-                   },
-                   column_values)
+      assert_equal([
+                     true,
+                     "Log",
+                     [
+                       [
+                         "message",
+                         build_string_array(["Crash", "Error", "Shutdown"]),
+                       ],
+                       [
+                         "is_critical",
+                         build_boolean_array([true, true, false]),
+                       ],
+                     ],
+                   ],
+                   [
+                     reader.has_description?,
+                     reader.description,
+                     columns,
+                   ])
     ensure
       input.close
     end
+  end
+
+  def test_write
+    messages = build_string_array(["Crash", "Error", "Shutdown"])
+    is_criticals = build_boolean_array([true, true, false])
+    table = build_table("message" => messages,
+                        "is_critical" => is_criticals)
+
+    tempfile = Tempfile.open("arrow-feather-file-writer")
+
+    output = Arrow::FileOutputStream.new(tempfile.path, false)
+    writer = Arrow::FeatherFileWriter.new(output)
+    writer.n_rows = table.n_rows
+    writer.write(table)
+    writer.close
+    output.close
+
+    input = Arrow::MemoryMappedInputStream.new(tempfile.path)
+    reader = Arrow::FeatherFileReader.new(input)
+    assert_equal([table.n_rows, table],
+                 [reader.n_rows, reader.read])
+    input.close
   end
 end

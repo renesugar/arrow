@@ -20,19 +20,33 @@ module Arrow
     include Enumerable
 
     class << self
-      def new(values)
+      def new(*args)
         builder_class_name = "#{name}Builder"
         if const_defined?(builder_class_name)
           builder_class = const_get(builder_class_name)
-          builder_class.build(values)
+          if builder_class.buildable?(args)
+            builder_class.build(*args)
+          else
+            super
+          end
         else
           super
         end
       end
     end
 
+    # @param i [Integer]
+    #   The index of the value to be gotten.
+    #
+    #   You can specify negative index like for `::Array#[]`.
+    #
+    # @return [Object, nil]
+    #   The `i`-th value.
+    #
+    #   `nil` for NULL value or out of range `i`.
     def [](i)
       i += length if i < 0
+      return nil if i < 0 or i >= length
       if null?(i)
         nil
       else
@@ -58,6 +72,15 @@ module Arrow
 
     def to_arrow
       self
+    end
+
+    alias_method :value_data_type_raw, :value_data_type
+    def value_data_type
+      @value_data_type ||= value_data_type_raw
+    end
+
+    def to_a
+      values
     end
   end
 end

@@ -16,7 +16,11 @@
 
 package arrow
 
-import "fmt"
+import (
+	"fmt"
+	"reflect"
+	"strings"
+)
 
 // ListType describes a nested type in which each array slot contains
 // a variable-size sequence of values, all having the same relative type.
@@ -35,18 +39,53 @@ func ListOf(t DataType) *ListType {
 	return &ListType{elem: t}
 }
 
-func (*ListType) ID() Type     { return LIST }
-func (*ListType) Name() string { return "list" }
+func (*ListType) ID() Type         { return LIST }
+func (*ListType) Name() string     { return "list" }
+func (t *ListType) String() string { return fmt.Sprintf("list<item: %v>", t.elem) }
 
 // Elem returns the ListType's element type.
 func (t *ListType) Elem() DataType { return t.elem }
+
+// FixedSizeListType describes a nested type in which each array slot contains
+// a fixed-size sequence of values, all having the same relative type.
+type FixedSizeListType struct {
+	n    int32    // number of elements in the list
+	elem DataType // DataType of the list's elements
+}
+
+// FixedSizeListOf returns the list type with element type t.
+// For example, if t represents int32, FixedSizeListOf(10, t) represents [10]int32.
+//
+// FixedSizeListOf panics if t is nil or invalid.
+// FixedSizeListOf panics if n is <= 0.
+func FixedSizeListOf(n int32, t DataType) *FixedSizeListType {
+	if t == nil {
+		panic("arrow: nil DataType")
+	}
+	if n <= 0 {
+		panic("arrow: invalid size")
+	}
+	return &FixedSizeListType{elem: t, n: n}
+}
+
+func (*FixedSizeListType) ID() Type     { return FIXED_SIZE_LIST }
+func (*FixedSizeListType) Name() string { return "fixed_size_list" }
+func (t *FixedSizeListType) String() string {
+	return fmt.Sprintf("fixed_size_list<item: %v>[%d]", t.elem, t.n)
+}
+
+// Elem returns the FixedSizeListType's element type.
+func (t *FixedSizeListType) Elem() DataType { return t.elem }
+
+// Len returns the FixedSizeListType's size.
+func (t *FixedSizeListType) Len() int32 { return t.n }
 
 // StructType describes a nested type parameterized by an ordered sequence
 // of relative types, called its fields.
 type StructType struct {
 	fields []Field
 	index  map[string]int
-	meta   KeyValueMetadata
+	meta   Metadata
 }
 
 // StructOf returns the struct type with fields fs.
@@ -85,6 +124,19 @@ func StructOf(fs ...Field) *StructType {
 func (*StructType) ID() Type     { return STRUCT }
 func (*StructType) Name() string { return "struct" }
 
+func (t *StructType) String() string {
+	o := new(strings.Builder)
+	o.WriteString("struct<")
+	for i, f := range t.fields {
+		if i > 0 {
+			o.WriteString(", ")
+		}
+		o.WriteString(fmt.Sprintf("%s: %v", f.Name, f.Type))
+	}
+	o.WriteString(">")
+	return o.String()
+}
+
 func (t *StructType) Fields() []Field   { return t.fields }
 func (t *StructType) Field(i int) Field { return t.fields[i] }
 
@@ -97,32 +149,29 @@ func (t *StructType) FieldByName(name string) (Field, bool) {
 }
 
 type Field struct {
-	Name     string           // Field name
-	Type     DataType         // The field's data type
-	Nullable bool             // Fields can be nullable
-	Metadata KeyValueMetadata // The field's metadata, if any
+	Name     string   // Field name
+	Type     DataType // The field's data type
+	Nullable bool     // Fields can be nullable
+	Metadata Metadata // The field's metadata, if any
 }
 
-func (f Field) HasMetadata() bool { return len(f.Metadata.keys) != 0 }
+func (f Field) HasMetadata() bool { return f.Metadata.Len() != 0 }
 
-type KeyValueMetadata struct {
-	keys   []string
-	values []string
+func (f Field) Equal(o Field) bool {
+	return reflect.DeepEqual(f, o)
 }
 
-func (kv KeyValueMetadata) clone() KeyValueMetadata {
-	if len(kv.keys) == 0 {
-		return KeyValueMetadata{}
+func (f Field) String() string {
+	o := new(strings.Builder)
+	nullable := ""
+	if f.Nullable {
+		nullable = ", nullable"
 	}
-
-	o := KeyValueMetadata{
-		keys:   make([]string, len(kv.keys)),
-		values: make([]string, len(kv.values)),
+	fmt.Fprintf(o, "%s: type=%v%v", f.Name, f.Type, nullable)
+	if f.HasMetadata() {
+		fmt.Fprintf(o, "\n%*.smetadata: %v", len(f.Name)+2, "", f.Metadata)
 	}
-	copy(o.keys, kv.keys)
-	copy(o.values, kv.values)
-
-	return o
+	return o.String()
 }
 
 var (

@@ -1,13 +1,12 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ *    http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,17 +17,18 @@
 
 package org.apache.arrow.vector.complex.impl;
 
+import org.apache.arrow.util.Preconditions;
 import org.apache.arrow.vector.complex.ListVector;
 import org.apache.arrow.vector.complex.NonNullableStructVector;
-import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.complex.StateTool;
+import org.apache.arrow.vector.complex.StructVector;
 import org.apache.arrow.vector.complex.writer.BaseWriter.ComplexWriter;
 import org.apache.arrow.vector.types.pojo.Field;
 
-import com.google.common.base.Preconditions;
-
+/**
+ * Concrete implementation of {@link ComplexWriter}.
+ */
 public class ComplexWriterImpl extends AbstractFieldWriter implements ComplexWriter {
-//  private static final org.slf4j.Logger logger = org.slf4j.LoggerFactory.getLogger(ComplexWriterImpl.class);
 
   private NullableStructWriter structRoot;
   private UnionListWriter listRoot;
@@ -39,16 +39,27 @@ public class ComplexWriterImpl extends AbstractFieldWriter implements ComplexWri
   private final boolean unionEnabled;
   private final NullableStructWriterFactory nullableStructWriterFactory;
 
-  private enum Mode {INIT, STRUCT, LIST}
+  private enum Mode { INIT, STRUCT, LIST }
 
-  ;
-
-  public ComplexWriterImpl(String name, NonNullableStructVector container, boolean unionEnabled, boolean caseSensitive) {
+  /**
+   * Constructs a new instance.
+   *
+   * @param name The name of the writer (for tracking).
+   * @param container A container for the data field to be written.
+   * @param unionEnabled Unused.
+   * @param caseSensitive Whether field names are case sensitive (if false field names will be lowercase.
+   */
+  public ComplexWriterImpl(
+      String name,
+      NonNullableStructVector container,
+      boolean unionEnabled,
+      boolean caseSensitive) {
     this.name = name;
     this.container = container;
     this.unionEnabled = unionEnabled;
-    nullableStructWriterFactory = caseSensitive ? NullableStructWriterFactory.getNullableCaseSensitiveStructWriterFactoryInstance() :
-        NullableStructWriterFactory.getNullableStructWriterFactoryInstance();
+    nullableStructWriterFactory = caseSensitive ?
+      NullableStructWriterFactory.getNullableCaseSensitiveStructWriterFactoryInstance() :
+      NullableStructWriterFactory.getNullableStructWriterFactoryInstance();
   }
 
   public ComplexWriterImpl(String name, NonNullableStructVector container, boolean unionEnabled) {
@@ -96,6 +107,8 @@ public class ComplexWriterImpl extends AbstractFieldWriter implements ComplexWri
       case LIST:
         listRoot.clear();
         break;
+      default:
+        break;
     }
   }
 
@@ -107,6 +120,8 @@ public class ComplexWriterImpl extends AbstractFieldWriter implements ComplexWri
         break;
       case LIST:
         listRoot.setValueCount(count);
+        break;
+      default:
         break;
     }
   }
@@ -121,10 +136,15 @@ public class ComplexWriterImpl extends AbstractFieldWriter implements ComplexWri
       case LIST:
         listRoot.setPosition(index);
         break;
+      default:
+        break;
     }
   }
 
-
+  /**
+   * Returns a StructWriter, initializing it necessary from the constructor this instance
+   * was constructed with.
+   */
   public StructWriter directStruct() {
     Preconditions.checkArgument(name == null);
 

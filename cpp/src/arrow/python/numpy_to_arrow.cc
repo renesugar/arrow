@@ -17,17 +17,15 @@
 
 // Functions for pandas conversion via NumPy
 
-#define ARROW_NO_DEFAULT_MEMORY_POOL
-
 #include "arrow/python/numpy_to_arrow.h"
 #include "arrow/python/numpy_interop.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <memory>
-#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -37,10 +35,12 @@
 #include "arrow/table.h"
 #include "arrow/type_fwd.h"
 #include "arrow/type_traits.h"
-#include "arrow/util/bit-util.h"
+#include "arrow/util/bit_util.h"
 #include "arrow/util/checked_cast.h"
 #include "arrow/util/logging.h"
 #include "arrow/util/macros.h"
+#include "arrow/util/string.h"
+#include "arrow/util/utf8.h"
 #include "arrow/visitor_inline.h"
 
 #include "arrow/compute/context.h"
@@ -48,15 +48,20 @@
 
 #include "arrow/python/common.h"
 #include "arrow/python/config.h"
+#include "arrow/python/datetime.h"
 #include "arrow/python/helpers.h"
 #include "arrow/python/iterators.h"
-#include "arrow/python/numpy-internal.h"
 #include "arrow/python/numpy_convert.h"
+#include "arrow/python/numpy_internal.h"
 #include "arrow/python/python_to_arrow.h"
 #include "arrow/python/type_traits.h"
-#include "arrow/python/util/datetime.h"
 
 namespace arrow {
+
+using internal::checked_cast;
+using internal::CopyBitmap;
+using internal::GenerateBitsUnrolled;
+
 namespace py {
 
 using internal::NumPyTypeSize;
@@ -120,7 +125,7 @@ class NumPyNullsConverter {
 
     const bool null_sentinels_possible =
         // Always treat Numpy's NaT as null
-        TYPE == NPY_DATETIME ||
+        TYPE == NPY_DATETIME || TYPE == NPY_TIMEDELTA ||
         // Observing pandas's null sentinels
         (from_pandas_ && traits::supports_nulls);
 
@@ -173,13 +178,15 @@ int64_t MaskToBitmap(PyArrayObject* mask, int64_t length, uint8_t* bitmap) {
 class NumPyConverter {
  public:
   NumPyConverter(MemoryPool* pool, PyObject* arr, PyObject* mo,
-                 const std::shared_ptr<DataType>& type, bool from_pandas)
+                 const std::shared_ptr<DataType>& type, bool from_pandas,
+                 const compute::CastOptions& cast_options = compute::CastOptions())
       : pool_(pool),
         type_(type),
         arr_(reinterpret_cast<PyArrayObject*>(arr)),
         dtype_(PyArray_DESCR(arr_)),
         mask_(nullptr),
         from_pandas_(from_pandas),
+        cast_options_(cast_options),
         null_bitmap_data_(nullptr),
         null_count_(0) {
     if (mo != nullptr && mo != Py_None) {
@@ -211,6 +218,7 @@ class NumPyConverter {
   Status Visit(const TimestampType& type) { return VisitNative<TimestampType>(); }
   Status Visit(const Time32Type& type) { return VisitNative<Int32Type>(); }
   Status Visit(const Time64Type& type) { return VisitNative<Int64Type>(); }
+  Status Visit(const DurationType& type) { return VisitNative<DurationType>(); }
 
   Status Visit(const NullType& type) { return TypeNotImplemented(type.ToString()); }
 
@@ -224,11 +232,8 @@ class NumPyConverter {
 
   Status Visit(const FixedSizeBinaryType& type);
 
-  Status Visit(const Decimal128Type& type) { return TypeNotImplemented(type.ToString()); }
-
-  Status Visit(const DictionaryType& type) { return TypeNotImplemented(type.ToString()); }
-
-  Status Visit(const NestedType& type) { return TypeNotImplemented(type.ToString()); }
+  // Default case
+  Status Visit(const DataType& type) { return TypeNotImplemented(type.ToString()); }
 
  protected:
   Status InitNullBitmap() {
@@ -236,6 +241,11 @@ class NumPyConverter {
     null_bitmap_data_ = null_bitmap_->mutable_data();
     return Status::OK();
   }
+
+  // Called before ConvertData to ensure Numpy input buffer is in expected
+  // Arrow layout
+  template <typename ArrowType>
+  Status PrepareInputData(std::shared_ptr<Buffer>* data);
 
   // ----------------------------------------------------------------------
   // Traditional visitor conversion for non-object arrays
@@ -274,9 +284,8 @@ class NumPyConverter {
   }
 
   Status TypeNotImplemented(std::string type_name) {
-    std::stringstream ss;
-    ss << "NumPyConverter doesn't implement <" << type_name << "> conversion. ";
-    return Status::NotImplemented(ss.str());
+    return Status::NotImplemented("NumPyConverter doesn't implement <", type_name,
+                                  "> conversion. ");
   }
 
   MemoryPool* pool_;
@@ -289,6 +298,7 @@ class NumPyConverter {
   int itemsize_;
 
   bool from_pandas_;
+  compute::CastOptions cast_options_;
 
   // Used in visitor pattern
   ArrayVector out_arrays_;
@@ -303,8 +313,18 @@ Status NumPyConverter::Convert() {
     return Status::Invalid("only handle 1-dimensional arrays");
   }
 
-  DCHECK_NE(dtype_->type_num, NPY_OBJECT)
-      << "This class does not handle NPY_OBJECT arrays";
+  if (dtype_->type_num == NPY_OBJECT) {
+    // If an object array, convert it like a normal Python sequence
+    PyConversionOptions py_options;
+    py_options.type = type_;
+    py_options.from_pandas = from_pandas_;
+    std::shared_ptr<ChunkedArray> res;
+    RETURN_NOT_OK(ConvertPySequence(reinterpret_cast<PyObject*>(arr_),
+                                    reinterpret_cast<PyObject*>(mask_), py_options,
+                                    &res));
+    out_arrays_ = res->chunks();
+    return Status::OK();
+  }
 
   if (type_ == nullptr) {
     return Status::Invalid("Must pass data type for non-object arrays");
@@ -319,7 +339,8 @@ namespace {
 Status CastBuffer(const std::shared_ptr<DataType>& in_type,
                   const std::shared_ptr<Buffer>& input, const int64_t length,
                   const std::shared_ptr<Buffer>& valid_bitmap, const int64_t null_count,
-                  const std::shared_ptr<DataType>& out_type, MemoryPool* pool,
+                  const std::shared_ptr<DataType>& out_type,
+                  const compute::CastOptions& cast_options, MemoryPool* pool,
                   std::shared_ptr<Buffer>* out) {
   // Must cast
   auto tmp_data = ArrayData::Make(in_type, length, {valid_bitmap, input}, null_count);
@@ -328,9 +349,6 @@ Status CastBuffer(const std::shared_ptr<DataType>& in_type,
   std::shared_ptr<Array> casted_array;
 
   compute::FunctionContext context(pool);
-  compute::CastOptions cast_options;
-  cast_options.allow_int_overflow = false;
-  cast_options.allow_time_truncate = false;
 
   RETURN_NOT_OK(
       compute::Cast(&context, *tmp_array, out_type, cast_options, &casted_array));
@@ -373,82 +391,93 @@ void CopyStridedNatural(T* input_data, int64_t length, int64_t stride, T* output
   }
 }
 
-template <typename ArrowType>
-Status CopyStridedArray(PyArrayObject* arr, const int64_t length, MemoryPool* pool,
+class NumPyStridedConverter {
+ public:
+  static Status Convert(PyArrayObject* arr, int64_t length, MemoryPool* pool,
                         std::shared_ptr<Buffer>* out) {
-  using traits = internal::arrow_traits<ArrowType::type_id>;
-  using T = typename traits::T;
+    NumPyStridedConverter converter(arr, length, pool);
+    RETURN_NOT_OK(VisitNumpyArrayInline(arr, &converter));
+    *out = converter.buffer_;
+    return Status::OK();
+  }
+  template <int TYPE>
+  Status Visit(PyArrayObject* arr) {
+    using traits = internal::npy_traits<TYPE>;
+    using T = typename traits::value_type;
 
-  // Strided, must copy into new contiguous memory
-  std::shared_ptr<Buffer> new_buffer;
-  RETURN_NOT_OK(AllocateBuffer(pool, sizeof(T) * length, &new_buffer));
+    RETURN_NOT_OK(AllocateBuffer(pool_, sizeof(T) * length_, &buffer_));
 
-  const int64_t stride = PyArray_STRIDES(arr)[0];
-  if (stride % sizeof(T) == 0) {
-    const int64_t stride_elements = stride / sizeof(T);
-    CopyStridedNatural(reinterpret_cast<T*>(PyArray_DATA(arr)), length, stride_elements,
-                       reinterpret_cast<T*>(new_buffer->mutable_data()));
-  } else {
-    CopyStridedBytewise(reinterpret_cast<int8_t*>(PyArray_DATA(arr)), length, stride,
-                        reinterpret_cast<T*>(new_buffer->mutable_data()));
+    const int64_t stride = PyArray_STRIDES(arr)[0];
+    if (stride % sizeof(T) == 0) {
+      const int64_t stride_elements = stride / sizeof(T);
+      CopyStridedNatural(reinterpret_cast<T*>(PyArray_DATA(arr)), length_,
+                         stride_elements, reinterpret_cast<T*>(buffer_->mutable_data()));
+    } else {
+      CopyStridedBytewise(reinterpret_cast<int8_t*>(PyArray_DATA(arr)), length_, stride,
+                          reinterpret_cast<T*>(buffer_->mutable_data()));
+    }
+    return Status::OK();
   }
 
-  *out = new_buffer;
-  return Status::OK();
-}
+ protected:
+  NumPyStridedConverter(PyArrayObject* arr, int64_t length, MemoryPool* pool)
+      : arr_(arr), length_(length), pool_(pool), buffer_(nullptr) {}
+  PyArrayObject* arr_;
+  int64_t length_;
+  MemoryPool* pool_;
+  std::shared_ptr<Buffer> buffer_;
+};
 
 }  // namespace
 
 template <typename ArrowType>
-inline Status NumPyConverter::ConvertData(std::shared_ptr<Buffer>* data) {
-  if (is_strided()) {
-    RETURN_NOT_OK(CopyStridedArray<ArrowType>(arr_, length_, pool_, data));
+inline Status NumPyConverter::PrepareInputData(std::shared_ptr<Buffer>* data) {
+  if (PyArray_ISBYTESWAPPED(arr_)) {
+    // TODO
+    return Status::NotImplemented("Byte-swapped arrays not supported");
+  }
+
+  if (dtype_->type_num == NPY_BOOL) {
+    int64_t nbytes = BitUtil::BytesForBits(length_);
+    std::shared_ptr<Buffer> buffer;
+    RETURN_NOT_OK(AllocateBuffer(pool_, nbytes, &buffer));
+
+    Ndarray1DIndexer<uint8_t> values(arr_);
+    int64_t i = 0;
+    const auto generate = [&values, &i]() -> bool { return values[i++] > 0; };
+    GenerateBitsUnrolled(buffer->mutable_data(), 0, length_, generate);
+
+    *data = buffer;
+  } else if (is_strided()) {
+    RETURN_NOT_OK(NumPyStridedConverter::Convert(arr_, length_, pool_, data));
   } else {
     // Can zero-copy
     *data = std::make_shared<NumPyBuffer>(reinterpret_cast<PyObject*>(arr_));
   }
+
+  return Status::OK();
+}
+
+template <typename ArrowType>
+inline Status NumPyConverter::ConvertData(std::shared_ptr<Buffer>* data) {
+  RETURN_NOT_OK(PrepareInputData<ArrowType>(data));
 
   std::shared_ptr<DataType> input_type;
   RETURN_NOT_OK(NumPyDtypeToArrow(reinterpret_cast<PyObject*>(dtype_), &input_type));
 
   if (!input_type->Equals(*type_)) {
-    RETURN_NOT_OK(CastBuffer(input_type, *data, length_, nullptr, 0, type_, pool_, data));
+    RETURN_NOT_OK(CastBuffer(input_type, *data, length_, null_bitmap_, null_count_, type_,
+                             cast_options_, pool_, data));
   }
 
-  return Status::OK();
-}
-
-template <>
-inline Status NumPyConverter::ConvertData<BooleanType>(std::shared_ptr<Buffer>* data) {
-  int64_t nbytes = BitUtil::BytesForBits(length_);
-  std::shared_ptr<Buffer> buffer;
-  RETURN_NOT_OK(AllocateBuffer(pool_, nbytes, &buffer));
-
-  Ndarray1DIndexer<uint8_t> values(arr_);
-
-  uint8_t* bitmap = buffer->mutable_data();
-
-  memset(bitmap, 0, nbytes);
-  for (int i = 0; i < length_; ++i) {
-    if (values[i] > 0) {
-      BitUtil::SetBit(bitmap, i);
-    }
-  }
-
-  *data = buffer;
   return Status::OK();
 }
 
 template <>
 inline Status NumPyConverter::ConvertData<Date32Type>(std::shared_ptr<Buffer>* data) {
-  if (is_strided()) {
-    RETURN_NOT_OK(CopyStridedArray<Date32Type>(arr_, length_, pool_, data));
-  } else {
-    // Can zero-copy
-    *data = std::make_shared<NumPyBuffer>(reinterpret_cast<PyObject*>(arr_));
-  }
-
   std::shared_ptr<DataType> input_type;
+
+  RETURN_NOT_OK(PrepareInputData<Date32Type>(data));
 
   auto date_dtype = reinterpret_cast<PyArray_DatetimeDTypeMetaData*>(dtype_->c_metadata);
   if (dtype_->type_num == NPY_DATETIME) {
@@ -465,14 +494,14 @@ inline Status NumPyConverter::ConvertData<Date32Type>(std::shared_ptr<Buffer>* d
       if (!input_type->Equals(*type_)) {
         // The null bitmap was already computed in VisitNative()
         RETURN_NOT_OK(CastBuffer(input_type, *data, length_, null_bitmap_, null_count_,
-                                 type_, pool_, data));
+                                 type_, cast_options_, pool_, data));
       }
     }
   } else {
     RETURN_NOT_OK(NumPyDtypeToArrow(reinterpret_cast<PyObject*>(dtype_), &input_type));
     if (!input_type->Equals(*type_)) {
-      RETURN_NOT_OK(
-          CastBuffer(input_type, *data, length_, nullptr, 0, type_, pool_, data));
+      RETURN_NOT_OK(CastBuffer(input_type, *data, length_, null_bitmap_, null_count_,
+                               type_, cast_options_, pool_, data));
     }
   }
 
@@ -481,16 +510,10 @@ inline Status NumPyConverter::ConvertData<Date32Type>(std::shared_ptr<Buffer>* d
 
 template <>
 inline Status NumPyConverter::ConvertData<Date64Type>(std::shared_ptr<Buffer>* data) {
-  if (is_strided()) {
-    RETURN_NOT_OK(CopyStridedArray<Date64Type>(arr_, length_, pool_, data));
-  } else {
-    // Can zero-copy
-    *data = std::make_shared<NumPyBuffer>(reinterpret_cast<PyObject*>(arr_));
-  }
-
   constexpr int64_t kMillisecondsInDay = 86400000;
-
   std::shared_ptr<DataType> input_type;
+
+  RETURN_NOT_OK(PrepareInputData<Date64Type>(data));
 
   auto date_dtype = reinterpret_cast<PyArray_DatetimeDTypeMetaData*>(dtype_->c_metadata);
   if (dtype_->type_num == NPY_DATETIME) {
@@ -512,68 +535,67 @@ inline Status NumPyConverter::ConvertData<Date64Type>(std::shared_ptr<Buffer>* d
       if (!input_type->Equals(*type_)) {
         // The null bitmap was already computed in VisitNative()
         RETURN_NOT_OK(CastBuffer(input_type, *data, length_, null_bitmap_, null_count_,
-                                 type_, pool_, data));
+                                 type_, cast_options_, pool_, data));
       }
     }
   } else {
     RETURN_NOT_OK(NumPyDtypeToArrow(reinterpret_cast<PyObject*>(dtype_), &input_type));
     if (!input_type->Equals(*type_)) {
-      RETURN_NOT_OK(
-          CastBuffer(input_type, *data, length_, nullptr, 0, type_, pool_, data));
+      RETURN_NOT_OK(CastBuffer(input_type, *data, length_, null_bitmap_, null_count_,
+                               type_, cast_options_, pool_, data));
     }
   }
 
   return Status::OK();
 }
 
+// Create 16MB chunks for binary data
+constexpr int32_t kBinaryChunksize = 1 << 24;
+
 Status NumPyConverter::Visit(const BinaryType& type) {
-  BinaryBuilder builder(pool_);
+  ::arrow::internal::ChunkedBinaryBuilder builder(kBinaryChunksize, pool_);
 
   auto data = reinterpret_cast<const uint8_t*>(PyArray_DATA(arr_));
 
-  int item_length = 0;
+  auto AppendNotNull = [&builder, this](const uint8_t* data) {
+    // This is annoying. NumPy allows strings to have nul-terminators, so
+    // we must check for them here
+    const size_t item_size =
+        strnlen(reinterpret_cast<const char*>(data), static_cast<size_t>(itemsize_));
+    return builder.Append(data, static_cast<int32_t>(item_size));
+  };
+
   if (mask_ != nullptr) {
     Ndarray1DIndexer<uint8_t> mask_values(mask_);
     for (int64_t i = 0; i < length_; ++i) {
       if (mask_values[i]) {
         RETURN_NOT_OK(builder.AppendNull());
       } else {
-        // This is annoying. NumPy allows strings to have nul-terminators, so
-        // we must check for them here
-        for (item_length = 0; item_length < itemsize_; ++item_length) {
-          if (data[item_length] == 0) {
-            break;
-          }
-        }
-        RETURN_NOT_OK(builder.Append(data, item_length));
+        RETURN_NOT_OK(AppendNotNull(data));
       }
       data += stride_;
     }
   } else {
     for (int64_t i = 0; i < length_; ++i) {
-      for (item_length = 0; item_length < itemsize_; ++item_length) {
-        // Look for nul-terminator
-        if (data[item_length] == 0) {
-          break;
-        }
-      }
-      RETURN_NOT_OK(builder.Append(data, item_length));
+      RETURN_NOT_OK(AppendNotNull(data));
       data += stride_;
     }
   }
 
-  std::shared_ptr<Array> result;
+  ArrayVector result;
   RETURN_NOT_OK(builder.Finish(&result));
-  return PushArray(result->data());
+  for (auto arr : result) {
+    RETURN_NOT_OK(PushArray(arr->data()));
+  }
+  return Status::OK();
 }
 
 Status NumPyConverter::Visit(const FixedSizeBinaryType& type) {
   auto byte_width = type.byte_width();
 
   if (itemsize_ != byte_width) {
-    std::stringstream ss;
-    ss << "Got bytestring of length " << itemsize_ << " (expected " << byte_width << ")";
-    return Status::Invalid(ss.str());
+    return Status::Invalid("Got bytestring of length ", itemsize_, " (expected ",
+                           byte_width, ")");
   }
 
   FixedSizeBinaryBuilder builder(::arrow::fixed_size_binary(byte_width), pool_);
@@ -597,7 +619,7 @@ namespace {
 constexpr int kNumPyUnicodeSize = 4;
 
 Status AppendUTF32(const char* data, int itemsize, int byteorder,
-                   StringBuilder* builder) {
+                   ::arrow::internal::ChunkedStringBuilder* builder) {
   // The binary \x00\x00\x00\x00 indicates a nul terminator in NumPy unicode,
   // so we need to detect that here to truncate if necessary. Yep.
   int actual_length = 0;
@@ -619,25 +641,64 @@ Status AppendUTF32(const char* data, int itemsize, int byteorder,
   }
 
   const int32_t length = static_cast<int32_t>(PyBytes_GET_SIZE(utf8_obj.obj()));
-  if (builder->value_data_length() + length > kBinaryMemoryLimit) {
-    return Status::CapacityError("Encoded string length exceeds maximum size (2GB)");
-  }
-  return builder->Append(PyBytes_AS_STRING(utf8_obj.obj()), length);
+  return builder->Append(
+      reinterpret_cast<const uint8_t*>(PyBytes_AS_STRING(utf8_obj.obj())), length);
 }
 
 }  // namespace
 
 Status NumPyConverter::Visit(const StringType& type) {
-  StringBuilder builder(pool_);
+  util::InitializeUTF8();
 
-  auto data = reinterpret_cast<const char*>(PyArray_DATA(arr_));
+  ::arrow::internal::ChunkedStringBuilder builder(kBinaryChunksize, pool_);
 
-  char numpy_byteorder = PyArray_DESCR(arr_)->byteorder;
+  auto data = reinterpret_cast<const uint8_t*>(PyArray_DATA(arr_));
+
+  char numpy_byteorder = dtype_->byteorder;
 
   // For Python C API, -1 is little-endian, 1 is big-endian
   int byteorder = numpy_byteorder == '>' ? 1 : -1;
 
   PyAcquireGIL gil_lock;
+
+  const bool is_binary_type = dtype_->type_num == NPY_STRING;
+  const bool is_unicode_type = dtype_->type_num == NPY_UNICODE;
+
+  if (!is_binary_type && !is_unicode_type) {
+    const bool is_float_type = dtype_->kind == 'f';
+    if (from_pandas_ && is_float_type) {
+      // in case of from_pandas=True, accept an all-NaN float array as input
+      RETURN_NOT_OK(NumPyNullsConverter::Convert(pool_, arr_, from_pandas_, &null_bitmap_,
+                                                 &null_count_));
+      if (null_count_ == length_) {
+        auto arr = std::make_shared<NullArray>(length_);
+        std::shared_ptr<Array> out;
+        compute::FunctionContext context(pool_);
+        RETURN_NOT_OK(compute::Cast(&context, *arr, arrow::utf8(), cast_options_, &out));
+        out_arrays_.emplace_back(out);
+        return Status::OK();
+      }
+    }
+    std::string dtype_string;
+    RETURN_NOT_OK(internal::PyObject_StdStringStr(reinterpret_cast<PyObject*>(dtype_),
+                                                  &dtype_string));
+    return Status::TypeError("Expected a string or bytes dtype, got ", dtype_string);
+  }
+
+  auto AppendNonNullValue = [&](const uint8_t* data) {
+    if (is_binary_type) {
+      if (ARROW_PREDICT_TRUE(util::ValidateUTF8(data, itemsize_))) {
+        return builder.Append(data, itemsize_);
+      } else {
+        return Status::Invalid("Encountered non-UTF8 binary value: ",
+                               HexEncode(data, itemsize_));
+      }
+    } else {
+      // is_unicode_type case
+      return AppendUTF32(reinterpret_cast<const char*>(data), itemsize_, byteorder,
+                         &builder);
+    }
+  };
 
   if (mask_ != nullptr) {
     Ndarray1DIndexer<uint8_t> mask_values(mask_);
@@ -645,20 +706,23 @@ Status NumPyConverter::Visit(const StringType& type) {
       if (mask_values[i]) {
         RETURN_NOT_OK(builder.AppendNull());
       } else {
-        RETURN_NOT_OK(AppendUTF32(data, itemsize_, byteorder, &builder));
+        RETURN_NOT_OK(AppendNonNullValue(data));
       }
       data += stride_;
     }
   } else {
     for (int64_t i = 0; i < length_; ++i) {
-      RETURN_NOT_OK(AppendUTF32(data, itemsize_, byteorder, &builder));
+      RETURN_NOT_OK(AppendNonNullValue(data));
       data += stride_;
     }
   }
 
-  std::shared_ptr<Array> result;
+  ArrayVector result;
   RETURN_NOT_OK(builder.Finish(&result));
-  return PushArray(result->data());
+  for (auto arr : result) {
+    RETURN_NOT_OK(PushArray(arr->data()));
+  }
+  return Status::OK();
 }
 
 Status NumPyConverter::Visit(const StructType& type) {
@@ -676,9 +740,7 @@ Status NumPyConverter::Visit(const StructType& type) {
     for (auto field : type.children()) {
       PyObject* tup = PyDict_GetItemString(dtype_->fields, field->name().c_str());
       if (tup == NULL) {
-        std::stringstream ss;
-        ss << "Missing field '" << field->name() << "' in struct array";
-        return Status::TypeError(ss.str());
+        return Status::TypeError("Missing field '", field->name(), "' in struct array");
       }
       PyArray_Descr* sub_dtype =
           reinterpret_cast<PyArray_Descr*>(PyTuple_GET_ITEM(tup, 0));
@@ -770,26 +832,27 @@ Status NumPyConverter::Visit(const StructType& type) {
 
 Status NdarrayToArrow(MemoryPool* pool, PyObject* ao, PyObject* mo, bool from_pandas,
                       const std::shared_ptr<DataType>& type,
+                      const compute::CastOptions& cast_options,
                       std::shared_ptr<ChunkedArray>* out) {
   if (!PyArray_Check(ao)) {
     return Status::Invalid("Input object was not a NumPy array");
   }
-
-  PyArrayObject* arr = reinterpret_cast<PyArrayObject*>(ao);
-
-  if (PyArray_DESCR(arr)->type_num == NPY_OBJECT) {
-    PyConversionOptions py_options;
-    py_options.type = type;
-    py_options.from_pandas = from_pandas;
-    return ConvertPySequence(ao, mo, py_options, out);
+  if (PyArray_NDIM(reinterpret_cast<PyArrayObject*>(ao)) != 1) {
+    return Status::Invalid("only handle 1-dimensional arrays");
   }
 
-  NumPyConverter converter(pool, ao, mo, type, from_pandas);
+  NumPyConverter converter(pool, ao, mo, type, from_pandas, cast_options);
   RETURN_NOT_OK(converter.Convert());
   const auto& output_arrays = converter.result();
   DCHECK_GT(output_arrays.size(), 0);
   *out = std::make_shared<ChunkedArray>(output_arrays);
   return Status::OK();
+}
+
+Status NdarrayToArrow(MemoryPool* pool, PyObject* ao, PyObject* mo, bool from_pandas,
+                      const std::shared_ptr<DataType>& type,
+                      std::shared_ptr<ChunkedArray>* out) {
+  return NdarrayToArrow(pool, ao, mo, from_pandas, type, compute::CastOptions(), out);
 }
 
 }  // namespace py

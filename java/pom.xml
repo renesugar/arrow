@@ -20,24 +20,28 @@
 
   <groupId>org.apache.arrow</groupId>
   <artifactId>arrow-java-root</artifactId>
-  <version>0.11.0-SNAPSHOT</version>
+  <version>1.0.0-SNAPSHOT</version>
   <packaging>pom</packaging>
 
   <name>Apache Arrow Java Root POM</name>
   <description>Apache Arrow is open source, in-memory columnar data structures and low-overhead messaging</description>
-  <url>http://arrow.apache.org/</url>
+  <url>https://arrow.apache.org/</url>
 
   <properties>
     <target.gen.source.path>${project.basedir}/target/generated-sources</target.gen.source.path>
-    <dep.junit.version>4.11</dep.junit.version>
+    <dep.junit.platform.version>1.4.0</dep.junit.platform.version>
+    <dep.junit.jupiter.version>5.4.0</dep.junit.jupiter.version>
     <dep.slf4j.version>1.7.25</dep.slf4j.version>
-    <dep.guava.version>18.0</dep.guava.version>
-    <dep.netty.version>4.1.17.Final</dep.netty.version>
-    <dep.jackson.version>2.7.9</dep.jackson.version>
+    <dep.guava.version>20.0</dep.guava.version>
+    <dep.netty.version>4.1.27.Final</dep.netty.version>
+    <dep.jackson.version>2.9.8</dep.jackson.version>
     <dep.hadoop.version>2.7.1</dep.hadoop.version>
-    <fbs.version>1.2.0-3f79e055</fbs.version>
+    <dep.fbs.version>1.9.0</dep.fbs.version>
+    <dep.flatc.version>1.9.0</dep.flatc.version>
+    <arrow.vector.classifier />
     <forkCount>2</forkCount>
-    <checkstyle.failOnViolation>false</checkstyle.failOnViolation>
+    <checkstyle.failOnViolation>true</checkstyle.failOnViolation>
+    <errorprone.javac.version>9+181-r4173-1</errorprone.javac.version>
   </properties>
 
   <scm>
@@ -53,20 +57,20 @@
       <subscribe>dev-subscribe@arrow.apache.org</subscribe>
       <unsubscribe>dev-unsubscribe@arrow.apache.org</unsubscribe>
       <post>dev@arrow.apache.org</post>
-      <archive>http://mail-archives.apache.org/mod_mbox/arrow-dev/</archive>
+      <archive>https://mail-archives.apache.org/mod_mbox/arrow-dev/</archive>
     </mailingList>
     <mailingList>
       <name>Commits List</name>
       <subscribe>commits-subscribe@arrow.apache.org</subscribe>
       <unsubscribe>commits-unsubscribe@arrow.apache.org</unsubscribe>
       <post>commits@arrow.apache.org</post>
-      <archive>http://mail-archives.apache.org/mod_mbox/arrow-commits/</archive>
+      <archive>https://mail-archives.apache.org/mod_mbox/arrow-commits/</archive>
     </mailingList>
     <mailingList>
       <name>Issues List</name>
       <subscribe>issues-subscribe@arrow.apache.org</subscribe>
       <unsubscribe>issues-unsubscribe@arrow.apache.org</unsubscribe>
-      <archive>http://mail-archives.apache.org/mod_mbox/arrow-issues/</archive>
+      <archive>https://mail-archives.apache.org/mod_mbox/arrow-issues/</archive>
     </mailingList>
   </mailingLists>
 
@@ -97,6 +101,7 @@
         <configuration>
           <excludeSubProjects>false</excludeSubProjects>
           <excludes>
+            <exclude>**/dependency-reduced-pom.xml</exclude>
             <exclude>**/*.log</exclude>
             <exclude>**/*.css</exclude>
             <exclude>**/*.js</exclude>
@@ -155,7 +160,7 @@
             <manifestEntries>
               <Extension-Name>org.apache.arrow</Extension-Name>
               <Built-By>${username}</Built-By>
-              <url>http://arrow.apache.org/</url>
+              <url>https://arrow.apache.org/</url>
             </manifestEntries>
           </archive>
         </configuration>
@@ -259,7 +264,7 @@
 
         <configuration>
           <dateFormat>dd.MM.yyyy '@' HH:mm:ss z</dateFormat>
-          <verbose>true</verbose>
+          <verbose>false</verbose>
           <skipPoms>false</skipPoms>
           <generateGitPropertiesFile>true</generateGitPropertiesFile>
           <failOnNoGitDirectory>false</failOnNoGitDirectory>
@@ -307,6 +312,7 @@
           <configLocation>dev/checkstyle/checkstyle.xml</configLocation>
           <headerLocation>dev/checkstyle/checkstyle.license</headerLocation>
           <suppressionsLocation>dev/checkstyle/suppressions.xml</suppressionsLocation>
+          <includeTestSourceDirectory>true</includeTestSourceDirectory>
           <encoding>UTF-8</encoding>
           <consoleOutput>true</consoleOutput>
           <failsOnError>${checkstyle.failOnViolation}</failsOnError>
@@ -331,6 +337,10 @@
             <configuration>
               <ignoreNonCompile>true</ignoreNonCompile>
               <failOnWarning>true</failOnWarning>
+              <ignoredDependencies>
+                <!-- source annotations (not kept in compiled code) -->
+                <ignoredDependency>javax.annotation:javax.annotation-api:*</ignoredDependency>
+              </ignoredDependencies>
             </configuration>
           </execution>
         </executions>
@@ -347,7 +357,7 @@
         <plugin>
           <groupId>org.apache.rat</groupId>
           <artifactId>apache-rat-plugin</artifactId>
-          <version>0.11</version>
+          <version>0.13</version>
         </plugin>
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>
@@ -358,14 +368,27 @@
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-compiler-plugin</artifactId>
           <version>3.6.2</version>
+          <configuration>
+            <compilerArgs>
+              <arg>-XDcompilePolicy=simple</arg>
+              <arg>-Xplugin:ErrorProne</arg>
+            </compilerArgs>
+            <annotationProcessorPaths>
+              <path>
+                <groupId>com.google.errorprone</groupId>
+                <artifactId>error_prone_core</artifactId>
+                <version>2.3.3</version>
+              </path>
+            </annotationProcessorPaths>
+          </configuration>
         </plugin>
         <plugin>
           <artifactId>maven-enforcer-plugin</artifactId>
-          <version>3.0.0-M1</version>
+          <version>3.0.0-M2</version>
         </plugin>
         <plugin>
           <artifactId>maven-surefire-plugin</artifactId>
-          <version>2.20</version>
+          <version>3.0.0-M3</version>
           <configuration>
             <enableAssertions>true</enableAssertions>
             <childDelegation>true</childDelegation>
@@ -373,6 +396,9 @@
             <reuseForks>true</reuseForks>
             <systemPropertyVariables>
               <java.io.tmpdir>${project.build.directory}</java.io.tmpdir>
+              <io.netty.tryReflectionSetAccessible>true</io.netty.tryReflectionSetAccessible>
+              <arrow.vector.max_allocation_bytes>1048576</arrow.vector.max_allocation_bytes>
+              <user.timezone>UTC</user.timezone>
             </systemPropertyVariables>
             <!-- Note: changing the below configuration might increase the max allocation size for a vector
             which in turn can cause OOM. -->
@@ -478,9 +504,9 @@
   <dependencyManagement>
     <dependencies>
       <dependency>
-        <groupId>com.vlkan</groupId>
-        <artifactId>flatbuffers</artifactId>
-        <version>${fbs.version}</version>
+        <groupId>com.google.flatbuffers</groupId>
+        <artifactId>flatbuffers-java</artifactId>
+        <version>${dep.fbs.version}</version>
       </dependency>
       <dependency>
         <groupId>com.google.guava</groupId>
@@ -527,6 +553,11 @@
         <artifactId>slf4j-api</artifactId>
         <version>${dep.slf4j.version}</version>
       </dependency>
+      <dependency>
+        <groupId>javax.annotation</groupId>
+        <artifactId>javax.annotation-api</artifactId>
+        <version>1.3.2</version>
+      </dependency>
     </dependencies>
   </dependencyManagement>
 
@@ -553,31 +584,43 @@
       <scope>test</scope>
     </dependency>
 
+
     <dependency>
-      <!-- JMockit needs to be on class path before JUnit. -->
-      <groupId>org.jmockit</groupId>
-      <artifactId>jmockit</artifactId>
-      <version>1.33</version>
+      <groupId>org.junit.platform</groupId>
+      <artifactId>junit-platform-runner</artifactId>
+      <version>${dep.junit.platform.version}</version>
       <scope>test</scope>
     </dependency>
     <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter-engine</artifactId>
+      <version>${dep.junit.jupiter.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter-api</artifactId>
+      <version>${dep.junit.jupiter.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.vintage</groupId>
+      <artifactId>junit-vintage-engine</artifactId>
+      <version>${dep.junit.jupiter.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <!-- Use to keep older tests running -->
+    <dependency>
       <groupId>junit</groupId>
       <artifactId>junit</artifactId>
-      <version>${dep.junit.version}</version>
+      <version>4.12</version>
       <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.mockito</groupId>
-      <artifactId>mockito-core</artifactId>
-      <version>2.7.22</version>
+      <artifactId>mockito-junit-jupiter</artifactId>
+      <version>2.25.1</version>
       <scope>test</scope>
-      <!-- Mockito  contains old Hamcrest classes, causes issues with JUNIT -->
-      <exclusions>
-        <exclusion>
-         <groupId>org.hamcrest</groupId>
-          <artifactId>hamcrest-core</artifactId>
-	</exclusion>
-      </exclusions>
     </dependency>
     <dependency>
       <groupId>ch.qos.logback</groupId>
@@ -626,19 +669,65 @@
     <module>tools</module>
     <module>adapter/jdbc</module>
     <module>plasma</module>
+    <module>flight</module>
+    <module>performance</module>
+    <module>algorithm</module>
+    <module>adapter/avro</module>
+    <module>flight-grpc</module>
   </modules>
 
   <profiles>
     <profile>
       <id>java-8</id>
       <activation>
-	<jdk>[1.8,)</jdk>
+        <jdk>[1.8,)</jdk>
       </activation>
       <properties>
-	<doclint>none</doclint>
-	<additionalparam>-Xdoclint:none</additionalparam>
+        <doclint>none</doclint>
+        <additionalparam>-Xdoclint:none</additionalparam>
       </properties>
     </profile>
+
+    <profile>
+      <!-- orc java depends on arrow cpp, and arrow cpp isn't enabled by default yet -->
+      <id>arrow-jni</id>
+      <modules>
+        <!-- these have dependency on cpp -->
+        <module>adapter/orc</module>
+        <module>gandiva</module>
+      </modules>
+    </profile>
+
+    <profile>
+      <!-- Use the version of arrow-vector that shades flatbuffers and packages format -->
+      <id>shade-flatbuffers</id>
+      <properties>
+       <arrow.vector.classifier>shade-format-flatbuffers</arrow.vector.classifier>
+      </properties>
+    </profile>
+
+    <!-- using github.com/google/error-prone-javac is required when running on JDK 8 -->
+    <profile>
+      <id>jdk8</id>
+      <activation>
+        <jdk>1.8</jdk>
+      </activation>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-compiler-plugin</artifactId>
+            <configuration>
+              <fork>true</fork>
+              <compilerArgs combine.children="append">
+                <arg>-J-Xbootclasspath/p:${settings.localRepository}/com/google/errorprone/javac/${errorprone.javac.version}/javac-${errorprone.javac.version}.jar</arg>
+              </compilerArgs>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
   </profiles>
 
 </project>

@@ -25,7 +25,7 @@
 #include <arrow-glib/array-builder.hpp>
 #include <arrow-glib/buffer.hpp>
 #include <arrow-glib/chunked-array.hpp>
-#include <arrow-glib/column.hpp>
+#include <arrow-glib/codec.hpp>
 #include <arrow-glib/data-type.hpp>
 #include <arrow-glib/error.hpp>
 #include <arrow-glib/field.hpp>
@@ -41,8 +41,8 @@
 #include <arrow-glib/input-stream.hpp>
 #include <arrow-glib/output-stream.hpp>
 #include <arrow-glib/readable.hpp>
-#include <arrow-glib/writeable.hpp>
-#include <arrow-glib/writeable-file.hpp>
+#include <arrow-glib/writable.hpp>
+#include <arrow-glib/writable-file.hpp>
 
 #include <arrow-glib/metadata-version.hpp>
 #include <arrow-glib/reader.hpp>

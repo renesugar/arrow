@@ -17,34 +17,65 @@
 // specific language governing permissions and limitations
 // under the License.
 
+// @ts-check
+
 const fs = require('fs');
 const path = require('path');
-
-const ext = process.env.ARROW_JS_DEBUG === 'src' ? '.ts' : '';
-const base = process.env.ARROW_JS_DEBUG === 'src' ? '../src' : '../targets/apache-arrow';
-const { Message } = require(`${base}/ipc/metadata${ext}`);
-const { readBuffersAsync } = require(`${base}/ipc/reader/binary${ext}`);
-const { Table, VectorVisitor, fromReadableStream } = require(`../index${ext}`);
+const extension = process.env.ARROW_JS_DEBUG === 'src' ? '.ts' : '';
+const { RecordBatch, AsyncMessageReader } = require(`../index${extension}`);
+const { VectorLoader } = require(`../targets/apache-arrow/visitor/vectorloader`);
 
 (async () => {
-    const in_ = process.argv.length < 3
-        ? process.stdin : fs.createReadStream(path.resolve(process.argv[2]));
-    
-    let recordBatchIndex = 0;
-    let dictionaryBatchIndex = 0;
 
-    for await (let { message, loader } of readBuffersAsync(fromReadableStream(in_))) {
+    const readable = process.argv.length < 3 ? process.stdin : fs.createReadStream(path.resolve(process.argv[2]));
+    const reader = new AsyncMessageReader(readable);
 
-        if (Message.isRecordBatch(message)) {
-            console.log(`record batch ${++recordBatchIndex}, offset ${loader.messageOffset}`);
-        } else if (Message.isDictionaryBatch(message)) {
-            message = message.data;
-            console.log(`dictionary batch ${++dictionaryBatchIndex}, offset ${loader.messageOffset}`);
-        } else { continue; }
-        
-        message.buffers.forEach(({offset, length}, i) => {
-            console.log(`\tbuffer ${i+1}: { offset: ${offset},  length: ${length} }`);
+    let schema, recordBatchIndex = 0, dictionaryBatchIndex = 0;
+
+    for await (let message of reader) {
+
+        let bufferRegions = [];
+
+        if (message.isSchema()) {
+            schema = message.header();
+            continue;
+        } else if (message.isRecordBatch()) {
+            const header = message.header();
+            bufferRegions = header.buffers;
+            const body = await reader.readMessageBody(message.bodyLength);
+            const recordBatch = loadRecordBatch(schema, header, body);
+            console.log(`record batch ${++recordBatchIndex}: ${JSON.stringify({
+                offset: body.byteOffset,
+                length: body.byteLength,
+                numRows: recordBatch.length,
+            })}`);
+        } else if (message.isDictionaryBatch()) {
+            const header = message.header();
+            bufferRegions = header.data.buffers;
+            const type = schema.dictionaries.get(header.id);
+            const body = await reader.readMessageBody(message.bodyLength);
+            const recordBatch = loadDictionaryBatch(header.data, body, type);
+            console.log(`dictionary batch ${++dictionaryBatchIndex}: ${JSON.stringify({
+                offset: body.byteOffset,
+                length: body.byteLength,
+                numRows: recordBatch.length,
+                dictionaryId: header.id,
+            })}`);
+        }
+
+        bufferRegions.forEach(({ offset, length }, i) => {
+            console.log(`\tbuffer ${i + 1}: { offset: ${offset},  length: ${length} }`);
         });
     }
 
+    await reader.return();
+
 })().catch((e) => { console.error(e); process.exit(1); });
+
+function loadRecordBatch(schema, header, body) {
+    return new RecordBatch(schema, header.length, new VectorLoader(body, header.nodes, header.buffers, new Map()).visitMany(schema.fields));
+}
+
+function loadDictionaryBatch(header, body, dictionaryType) {
+    return RecordBatch.new(new VectorLoader(body, header.nodes, header.buffers, new Map()).visitMany([dictionaryType]));
+}

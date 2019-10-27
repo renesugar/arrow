@@ -30,6 +30,7 @@ module Arrow
     def initialize(path_or_data, **options)
       @path_or_data = path_or_data
       @options = options
+      @compression = @options.delete(:compression)
     end
 
     def load
@@ -60,11 +61,114 @@ module Arrow
     end
 
     def read_csv(csv)
-      reader = CSVReader.new(csv)
-      reader.read
+      values_set = []
+      csv.each do |row|
+        if row.is_a?(CSV::Row)
+          row = row.collect(&:last)
+        end
+        row.each_with_index do |value, i|
+          values = (values_set[i] ||= [])
+          values << value
+        end
+      end
+      return nil if values_set.empty?
+
+      arrays = values_set.collect.with_index do |values, i|
+        ArrayBuilder.build(values)
+      end
+      if csv.headers
+        names = csv.headers
+      else
+        names = arrays.size.times.collect(&:to_s)
+      end
+      raw_table = {}
+      names.each_with_index do |name, i|
+        raw_table[name] = arrays[i]
+      end
+      Table.new(raw_table)
+    end
+
+    def reader_options
+      options = CSVReadOptions.new
+      @options.each do |key, value|
+        case key
+        when :headers
+          case value
+          when ::Array
+            options.column_names = value
+          when String
+            return nil
+          else
+            if value
+              options.generate_column_names = false
+            else
+              options.generate_column_names = true
+            end
+          end
+        when :column_types
+          value.each do |name, type|
+            options.add_column_type(name, type)
+          end
+        when :schema
+          options.add_schema(value)
+        when :encoding
+          # process encoding on opening input
+        else
+          setter = "#{key}="
+          if options.respond_to?(setter)
+            options.__send__(setter, value)
+          else
+            return nil
+          end
+        end
+      end
+      options
+    end
+
+    def open_decompress_input(raw_input)
+      if @compression
+        codec = Codec.new(@compression)
+        CompressedInputStream.open(codec, raw_input) do |input|
+          yield(input)
+        end
+      else
+        yield(raw_input)
+      end
+    end
+
+    def open_encoding_convert_stream(raw_input, &block)
+      encoding = @options[:encoding]
+      if encoding
+        converter = Gio::CharsetConverter.new("UTF-8", encoding)
+        convert_input_stream =
+          Gio::ConverterInputStream.new(raw_input, converter)
+        GIOInputStream.open(convert_input_stream, &block)
+      else
+        yield(raw_input)
+      end
+    end
+
+    def wrap_input(raw_input)
+      open_decompress_input(raw_input) do |input_|
+        open_encoding_convert_stream(input_) do |input__|
+          yield(input__)
+        end
+      end
     end
 
     def load_from_path(path)
+      options = reader_options
+      if options
+        begin
+          MemoryMappedInputStream.open(path) do |raw_input|
+            wrap_input(raw_input) do |input|
+              return CSVReader.new(input, options).read
+            end
+          end
+        rescue Arrow::Error::Invalid, Gio::Error
+        end
+      end
+
       options = update_csv_parse_options(@options, :open_csv, path)
       open_csv(path, **options) do |csv|
         read_csv(csv)
@@ -72,6 +176,18 @@ module Arrow
     end
 
     def load_data(data)
+      options = reader_options
+      if options
+        begin
+          BufferInputStream.open(Buffer.new(data)) do |raw_input|
+            wrap_input(raw_input) do |input|
+              return CSVReader.new(input, options).read
+            end
+          end
+        rescue Arrow::Error::Invalid, Gio::Error
+        end
+      end
+
       options = update_csv_parse_options(@options, :parse_csv_data, data)
       parse_csv_data(data, **options) do |csv|
         read_csv(csv)
@@ -112,11 +228,16 @@ module Arrow
         field
       else
         begin
-          Time.iso8601(encoded_field)
+          ::Time.iso8601(encoded_field)
         rescue ArgumentError
           field
         end
       end
+    end
+
+    AVAILABLE_CSV_PARSE_OPTIONS = {}
+    CSV.instance_method(:initialize).parameters.each do |type, name|
+      AVAILABLE_CSV_PARSE_OPTIONS[name] = true if type == :key
     end
 
     def update_csv_parse_options(options, create_csv, *args)
@@ -125,6 +246,14 @@ module Arrow
       else
         converters = [:all, BOOLEAN_CONVERTER, ISO8601_CONVERTER]
         new_options = options.merge(converters: converters)
+      end
+
+      # TODO: Support :schema and :column_types
+
+      unless AVAILABLE_CSV_PARSE_OPTIONS.empty?
+        new_options.select! do |key, value|
+          AVAILABLE_CSV_PARSE_OPTIONS.key?(key)
+        end
       end
 
       unless options.key?(:headers)
@@ -195,7 +324,7 @@ module Arrow
             if current_column_type == :integer
               column_types[i] = candidate_type
             end
-          when Time
+          when ::Time
             candidate_type = :time
           when DateTime
             candidate_type = :date_time
